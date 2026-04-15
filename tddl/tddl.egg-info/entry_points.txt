@@ -1,0 +1,2 @@
+[console_scripts]
+tddl = tddl.__main__:main
