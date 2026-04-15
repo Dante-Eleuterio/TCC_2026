@@ -27,6 +27,12 @@ execution, and cleanup so you can focus on writing tests.
 tddl requires the following environment variables. Add them to your `~/.bashrc` and run `source ~/.bashrc` after.
 
 ```bash
+git clone https://github.com/ThrowTheSwitch/Unity.git
+cd Unity
+git pull
+```
+
+```bash
 # Required — path to the Unity root directory
 export UNITY_PATH="/path/to/Unity"
 
