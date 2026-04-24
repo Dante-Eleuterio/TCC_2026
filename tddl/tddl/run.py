@@ -30,22 +30,56 @@ from .helpers import die, info
 import shutil
 
 
-
-def run_tests(build_dir: Path, target: str) -> bool:
+def _resolve_executable(build_dir: Path, target: str) -> Path:
     executable = build_dir / target
     if not executable.exists():
         candidates = list(build_dir.rglob(target))
         if not candidates:
             die(f"Test executable not found after build: {target}")
         executable = candidates[0]
+    return executable
+
+
+def run_tests(build_dir: Path, target: str) -> bool:
+    executable = _resolve_executable(build_dir, target)
 
     info(f"Running tests: {executable}")
     print()
-    # -v (verbose) faz o Unity imprimir cada teste individualmente
-    # com seu resultado (PASS/FAIL/IGNORE), em vez de só o resumo final.
+    # -v faz o Unity imprimir cada teste individualmente (PASS/FAIL).
     result = subprocess.run([str(executable), "-v"])
     print()
     return result.returncode == 0
+
+
+def run_tests_valgrind(build_dir: Path, target: str) -> bool:
+    """
+    Roda o executável de teste sob valgrind com checks de memória estritos.
+
+    Valgrind é configurado com --error-exitcode=1, o que faz o processo sair
+    com 1 se algum erro de memória for detectado (vazamento, uso de memória
+    não inicializada, escrita fora dos limites, etc.), mesmo que os asserts
+    do Unity tenham passado.
+
+    Com isso, o retorno desta função reflete simultaneamente:
+      - exit code do Unity (testes falharam → !=0)
+      - exit code injetado por valgrind (erro de memória → !=0)
+    """
+    executable = _resolve_executable(build_dir, target)
+
+    info(f"Running tests under valgrind: {executable}")
+    print()
+    result = subprocess.run([
+        "valgrind",
+        "--leak-check=full",
+        "--show-leak-kinds=all",
+        "--track-origins=yes",
+        "--error-exitcode=1",
+        str(executable),
+        "-v",
+    ])
+    print()
+    return result.returncode == 0
+
 
 def run_gcovr(root: Path, build_dir: Path, test_file: Path, test_dir: Path) -> bool:
     """
@@ -124,9 +158,6 @@ def run_gcovr(root: Path, build_dir: Path, test_file: Path, test_dir: Path) -> b
 
     info(f"Coverage: {lines_covered}/{lines_total} lines ({line_percent:.2f}%)")
 
-    # gcovr emite 100.0 somente quando todas as linhas executáveis foram
-    # cobertas. Qualquer linha não coberta resulta em um valor estritamente
-    # menor, portanto a comparação direta é segura.
     if line_percent >= 100.0:
         info("Coverage: 100% — PASS")
         return True

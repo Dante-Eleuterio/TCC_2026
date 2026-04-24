@@ -53,25 +53,32 @@ from .path import *
 from .run import *
 
 def main() -> None:
-    filename, use_filc, use_coverage, src_arg = parse_args()
+    filename, use_filc, use_coverage, use_valgrind, src_arg = parse_args()
 
-    check_tools(use_coverage)
-    filc  = get_filc_path() if use_filc else None
+    check_tools(use_coverage, use_valgrind)
+    filc = get_filc_path() if use_filc else None
 
-    unity                       = get_unity_path()
-    root, test_dir, test_file   = resolve_paths(filename)
+    unity                     = get_unity_path()
+    root, test_dir, test_file = resolve_paths(filename)
     src_file = resolve_src_file(root, src_arg) if src_arg else None
     ensure_structure(root)
-    target                      = f"tddl_{test_file.stem}"
-    wrap_funcs = wrap_funcs = extract_wrap_funcs(test_file)
+    target     = f"tddl_{test_file.stem}"
+    wrap_funcs = extract_wrap_funcs(test_file)
 
     build_dir = Path(tempfile.mkdtemp(prefix="tddl_build_"))
+
+    # Compose mode description. --valgrind can combine with --coverage,
+    # so we build the label from parts.
     if use_filc:
         mode = "Fil-C (memory-safe)"
-    elif use_coverage:
-        mode = "gcc (coverage)"
     else:
-        mode = "gcc"
+        parts = ["gcc"]
+        if use_valgrind:
+            parts.append("valgrind")
+        if use_coverage:
+            parts.append("coverage")
+        mode = " + ".join(parts) if len(parts) > 1 else parts[0]
+
     info(f"Project  : {root}")
     info(f"Test file: {test_file}")
     info(f"Unity    : {unity}")
@@ -80,7 +87,10 @@ def main() -> None:
     info(f"Build    : {build_dir}")
     print()
 
-    generate_cmakelists(root, test_dir, test_file, unity, use_coverage, use_filc, filc, src_file,wrap_funcs)
+    generate_cmakelists(
+        root, test_dir, test_file, unity,
+        use_coverage, use_filc, filc, src_file, wrap_funcs,
+    )
 
     tests_passed  = False
     coverage_full = True   # só vira False se --coverage rodar e der <100%
@@ -88,13 +98,18 @@ def main() -> None:
     try:
         cmake_configure(test_dir, build_dir)
         cmake_build(build_dir, target)
-        tests_passed = run_tests(build_dir, target)
+
+        # Valgrind wraps the test runner; when --error-exitcode=1 is set,
+        # a memory error makes the process exit !=0 and tests_passed=False,
+        # even if every Unity assertion passed.
+        if use_valgrind:
+            tests_passed = run_tests_valgrind(build_dir, target)
+        else:
+            tests_passed = run_tests(build_dir, target)
 
         if use_coverage:
             if not tests_passed:
                 info("Tests FAILED — skipping gcovr.")
-                # Testes falharam: nem tentamos avaliar cobertura.
-                # O exit code já será !=0 por causa de tests_passed.
                 coverage_full = False
             else:
                 coverage_full = run_gcovr(root, build_dir, test_file, test_dir)
@@ -104,6 +119,9 @@ def main() -> None:
     finally:
         cleanup(build_dir)
 
+    # Final exit code logic:
+    #   - Tests must always pass (Unity asserts + valgrind clean if applicable).
+    #   - With --coverage, also require 100% line coverage.
     if use_coverage:
         success = tests_passed and coverage_full
     else:

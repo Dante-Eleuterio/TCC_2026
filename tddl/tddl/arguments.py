@@ -25,12 +25,12 @@
 import sys
 from .helpers import *
 
-def parse_args() -> tuple[str, bool, bool, str| None]:
+def parse_args() -> tuple[str, bool, bool, bool, str | None]:
     args = sys.argv[1:]
 
     if not args or args[0] in ("-h", "--help"):
         print("USAGE GUIDE FOR TDDL \n")
-        
+
         print("Build: $tddl build")
         print(
             "  -Run from the project root to generate expected structure.\n"
@@ -40,7 +40,7 @@ def parse_args() -> tuple[str, bool, bool, str| None]:
             "    project/        <- run tddl from here\n"
             "    ├── include/    <- public headers (.h)\n"
             "    ├── src/        <- reserved for future use\n"
-            "    └── tests/      <- where <test_file>/<test_file>.c\n"   
+            "    └── tests/      <- where <test_file>/<test_file>.c\n"
         )
         print("Usage: $tddl <test_file.c> ")
         print("  -Run from the project root. tddl looks for the file in <cwd>/tests/")
@@ -53,7 +53,7 @@ def parse_args() -> tuple[str, bool, bool, str| None]:
             "    ├── src/        <- reserved for future use\n"
             "    └── tests/\n"
             "        └── test01/\n"
-            "            └── test01.c\n"   
+            "            └── test01.c\n"
         )
         print("Usage: $tddl <test_file.c> --src <source_file.c>")
         print("  -Links a separate source file from src/ into the test build\n")
@@ -81,13 +81,31 @@ def parse_args() -> tuple[str, bool, bool, str| None]:
         print("  -Expects same project structure as in normal usage\n")
         print("  -Compiles test with filc and then runs all tests \n")
         print("  -WILL CREATE A NEW CMAKESLIST.TXT IN THE SAME FOLDER OF TEST_NAME.C. IT WILL DELETE ANY OLD CMAKESLIST.TXT")
+
+        print("Usage: $tddl <test_file.c> --valgrind")
+        print("  -Expects same project structure as in normal usage\n")
+        print("  -Runs tests under valgrind with: --leak-check=full --show-leak-kinds=all --track-origins=yes --error-exitcode=1\n")
+        print("  -Any memory error detected by valgrind makes tddl exit with code != 0\n")
+        print("  -Can be combined with --coverage (valgrind runs the test; gcovr is run afterwards)\n")
+        print("  -CANNOT be combined with --filc (Fil-C already enforces memory safety at compile time;\n"
+              "   running valgrind on Fil-C binaries produces false positives)\n")
+        print("  -WILL CREATE A NEW CMAKESLIST.TXT IN THE SAME FOLDER OF TEST_NAME.C. IT WILL DELETE ANY OLD CMAKESLIST.TXT")
         sys.exit(0)
 
-    filename    = args[0]
-    use_filc    = "--filc" in args
+    filename     = args[0]
+    use_filc     = "--filc"     in args
     use_coverage = "--coverage" in args
+    use_valgrind = "--valgrind" in args
+
     if use_filc and use_coverage:
         die("--filc and --coverage cannot be used together")
+    if use_filc and use_valgrind:
+        die(
+            "--filc and --valgrind cannot be used together.\n"
+            "  Fil-C enforces memory safety at compile time, which makes valgrind redundant\n"
+            "  and produces false positives on Fil-C's runtime metadata.\n"
+            "  Pick one: --filc (compile-time safety) OR --valgrind (runtime safety)."
+        )
 
     src_file = None
     if "--src" in args:
@@ -96,7 +114,4 @@ def parse_args() -> tuple[str, bool, bool, str| None]:
             die("--src requires a filename argument. e.g. --src constroi_nome.c")
         src_file = args[src_index + 1]
 
-
-
-
-    return filename, use_filc, use_coverage, src_file
+    return filename, use_filc, use_coverage, use_valgrind, src_file

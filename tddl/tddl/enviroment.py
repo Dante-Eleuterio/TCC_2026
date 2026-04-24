@@ -58,10 +58,12 @@ def get_filc_path() -> Path:
         die(f"FIL_C_PATH points to a non-existent file: {filc}")
     return filc
 
-def check_tools(use_coverage) -> None:
+def check_tools(use_coverage: bool, use_valgrind: bool = False) -> None:
     tools = ["cmake"]
     if use_coverage:
         tools.append("gcovr")
+    if use_valgrind:
+        tools.append("valgrind")
     for tool in tools:
         if not shutil.which(tool):
             die(f"Required tool not found in PATH: {tool}")
