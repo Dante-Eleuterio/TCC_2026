@@ -82,7 +82,9 @@ def main() -> None:
 
     generate_cmakelists(root, test_dir, test_file, unity, use_coverage, use_filc, filc, src_file,wrap_funcs)
 
-    tests_passed = False
+    tests_passed  = False
+    coverage_full = True   # só vira False se --coverage rodar e der <100%
+
     try:
         cmake_configure(test_dir, build_dir)
         cmake_build(build_dir, target)
@@ -91,15 +93,23 @@ def main() -> None:
         if use_coverage:
             if not tests_passed:
                 info("Tests FAILED — skipping gcovr.")
+                # Testes falharam: nem tentamos avaliar cobertura.
+                # O exit code já será !=0 por causa de tests_passed.
+                coverage_full = False
             else:
-                run_gcovr(root, build_dir, test_file,test_dir)
+                coverage_full = run_gcovr(root, build_dir, test_file, test_dir)
         elif not tests_passed:
             info("Tests FAILED ")
 
     finally:
         cleanup(build_dir)
 
-    sys.exit(0 if tests_passed else 1)
+    if use_coverage:
+        success = tests_passed and coverage_full
+    else:
+        success = tests_passed
+
+    sys.exit(0 if success else 1)
 
 
 if __name__ == "__main__":

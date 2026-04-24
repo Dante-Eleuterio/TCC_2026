@@ -32,6 +32,8 @@ target_include_directories(tddl_constroi_nome PRIVATE
 
 target_compile_definitions(tddl_constroi_nome PRIVATE
     TEST
+    UNITY_USE_COMMAND_LINE_ARGS
+    UNITY_OUTPUT_COLOR
 )
 
 target_link_options(tddl_constroi_nome PRIVATE

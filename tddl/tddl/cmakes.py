@@ -141,6 +141,8 @@ target_include_directories({target} PRIVATE
 
 target_compile_definitions({target} PRIVATE
     TEST
+    UNITY_USE_COMMAND_LINE_ARGS
+    UNITY_OUTPUT_COLOR
 )
 
 {compile_options_block}{link_options_block}"""
