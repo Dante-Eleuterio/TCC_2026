@@ -28,23 +28,34 @@ from .helpers import die, info
 import re
 
 
-def get_root() -> Path: 
+def get_root() -> Path:
     return Path.cwd()
 
 
 def resolve_paths(arg: str) -> tuple[Path, Path, Path]:
+    """
+    Estrutura esperada (achatada):
+        project/
+        ├── include/
+        ├── src/
+        └── tests/
+            └── teste1.c   <- direto dentro de tests/
+
+    Retorna:
+        root      = cwd()
+        test_dir  = cwd()/tests/      <- mesmo diretório para todos os testes
+        test_file = cwd()/tests/<arg>
+    """
     filename = Path(arg).name
 
     if not filename.endswith(".c"):
         die(f"Expected a .c filename, got: {arg}")
 
-    root          = get_root()
-    all_tests_dir = root / "tests"
-    stem          = Path(filename).stem
-    test_dir      = all_tests_dir / stem
-    test_file     = test_dir / filename
+    root      = get_root()
+    test_dir  = root / "tests"
+    test_file = test_dir / filename
 
-    if not all_tests_dir.is_dir():
+    if not test_dir.is_dir():
         die(
             f"tests/ directory not found in: {root}\n"
             f"  Make sure you are running tddl from the project root and the project is built"
@@ -90,6 +101,7 @@ def ensure_structure(root: Path) -> None:
             info(f"  {path}")
     else:
         info("Project structure already exists — no directories created.")
+
 
 def extract_wrap_funcs(test_file: Path) -> list[str]:
     source = test_file.read_text()

@@ -25,22 +25,6 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 """
 tddl - TDD launcher for Unity-based C tests with gcovr coverage.
-
-Usage:
-    tddl test_constroi_nome.c
-
-    Run from the project root directory. tddl will look for the test file at:
-        <cwd>/tests/test_constroi_nome.c
-
-Expects:
-    - UNITY_PATH environment variable pointing to the Unity root directory
-    - Project structure:
-        project/          <- run tddl from here
-        ├── include/      <- public headers (.h)
-        ├── src/          <- source code
-        └── tests/
-            ├── test_constroi_nome.c   <- user-created test file
-            └── CMakeLists.txt         <- generated once by tddl
 """
 import sys
 import tempfile
@@ -52,10 +36,12 @@ from .helpers import *
 from .path import *
 from .run import *
 
-def main() -> None:
-    filename, use_filc, use_coverage, use_valgrind, src_arg = parse_args()
 
-    check_tools(use_coverage, use_valgrind)
+def main() -> None:
+    (filename, use_filc, use_coverage, use_valgrind, use_lizard,
+     ccn, length, args_threshold, src_arg) = parse_args()
+
+    check_tools(use_coverage, use_valgrind, use_lizard)
     filc = get_filc_path() if use_filc else None
 
     unity                     = get_unity_path()
@@ -67,17 +53,18 @@ def main() -> None:
 
     build_dir = Path(tempfile.mkdtemp(prefix="tddl_build_"))
 
-    # Compose mode description. --valgrind can combine with --coverage,
-    # so we build the label from parts.
+    # Compose mode description.
     if use_filc:
-        mode = "Fil-C (memory-safe)"
+        parts = ["Fil-C (memory-safe)"]
     else:
         parts = ["gcc"]
         if use_valgrind:
             parts.append("valgrind")
         if use_coverage:
             parts.append("coverage")
-        mode = " + ".join(parts) if len(parts) > 1 else parts[0]
+    if use_lizard:
+        parts.append(f"lizard(ccn={ccn},length={length},args={args_threshold})")
+    mode = " + ".join(parts) if len(parts) > 1 else parts[0]
 
     info(f"Project  : {root}")
     info(f"Test file: {test_file}")
@@ -93,15 +80,13 @@ def main() -> None:
     )
 
     tests_passed  = False
-    coverage_full = True   # só vira False se --coverage rodar e der <100%
+    coverage_full = True
+    lizard_clean  = True
 
     try:
         cmake_configure(test_dir, build_dir)
         cmake_build(build_dir, target)
 
-        # Valgrind wraps the test runner; when --error-exitcode=1 is set,
-        # a memory error makes the process exit !=0 and tests_passed=False,
-        # even if every Unity assertion passed.
         if use_valgrind:
             tests_passed = run_tests_valgrind(build_dir, target)
         else:
@@ -116,16 +101,20 @@ def main() -> None:
         elif not tests_passed:
             info("Tests FAILED ")
 
+        if use_lizard:
+            lizard_clean = run_lizard(
+                test_file, src_file,
+                ccn=ccn, length=length, args=args_threshold,
+            )
+
     finally:
         cleanup(build_dir)
 
-    # Final exit code logic:
-    #   - Tests must always pass (Unity asserts + valgrind clean if applicable).
-    #   - With --coverage, also require 100% line coverage.
+    success = tests_passed
     if use_coverage:
-        success = tests_passed and coverage_full
-    else:
-        success = tests_passed
+        success = success and coverage_full
+    if use_lizard:
+        success = success and lizard_clean
 
     sys.exit(0 if success else 1)
 

@@ -30,6 +30,16 @@ from .helpers import die, info
 import shutil
 
 
+# Thresholds padrão para --lizard.
+# Todos podem ser sobrescritos pelo usuário via:
+#   --ccn=N      complexidade ciclomática
+#   --length=N   linhas máximas por função
+#   --args=N     parâmetros máximos por função
+DEFAULT_LIZARD_CCN    = 10
+DEFAULT_LIZARD_LENGTH = 50
+DEFAULT_LIZARD_ARGS   = 5
+
+
 def _resolve_executable(build_dir: Path, target: str) -> Path:
     executable = build_dir / target
     if not executable.exists():
@@ -164,3 +174,99 @@ def run_gcovr(root: Path, build_dir: Path, test_file: Path, test_dir: Path) -> b
     else:
         info("Coverage below 100% — FAIL")
         return False
+
+
+def _lizard_one_file(target: Path, label: str, ccn: int, length: int, args: int) -> bool:
+    """
+    Roda lizard em um único arquivo e retorna True se estiver dentro dos
+    thresholds, False caso contrário.
+
+    Duas chamadas:
+      1. Relatório completo (todas as funções) — exibido ao usuário.
+      2. Modo strict (-w) — apenas para capturar o exit code limpo.
+    """
+    header = f"─── lizard: {label} ({target.name}) ─────────────────────────────"
+    print(header)
+
+    # 1. Relatório completo
+    subprocess.run([
+        "lizard",
+        "-C", str(ccn),
+        "-L", str(length),
+        "-a", str(args),
+        str(target),
+    ])
+
+    # 2. Modo "warnings only" para capturar o exit code
+    result = subprocess.run(
+        [
+            "lizard",
+            "-C", str(ccn),
+            "-L", str(length),
+            "-a", str(args),
+            "-w",
+            str(target),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    print()
+    if result.returncode == 0:
+        info(f"Lizard [{label}]: all functions within thresholds — PASS")
+        print()
+        return True
+    else:
+        if result.stdout.strip():
+            info(f"Lizard [{label}] violations:")
+            print(result.stdout)
+        info(f"Lizard [{label}]: thresholds exceeded — FAIL")
+        print()
+        return False
+
+
+def run_lizard(
+    test_file: Path,
+    src_file:  Path | None,
+    ccn:       int = DEFAULT_LIZARD_CCN,
+    length:    int = DEFAULT_LIZARD_LENGTH,
+    args:      int = DEFAULT_LIZARD_ARGS,
+) -> bool:
+    """
+    Roda lizard separadamente em cada arquivo de interesse:
+      - test_file (sempre)
+      - src_file  (se --src foi passado)
+
+    Cada arquivo recebe seu próprio cabeçalho na saída, deixando claro
+    qual relatório pertence a qual arquivo.
+
+    Parâmetros (todos com defaults — sobrescritos via CLI):
+      ccn    : threshold de complexidade ciclomática     (--ccn=N)
+      length : threshold de linhas por função            (--length=N)
+      args   : threshold de parâmetros por função        (--args=N)
+
+    Retorna True se ambos passarem nos thresholds, False se qualquer um
+    exceder.
+    """
+    info(
+        f"Lizard thresholds: CCN <= {ccn}, "
+        f"length <= {length}, "
+        f"args <= {args}"
+    )
+    print()
+
+    # Avalia AMBOS antes de retornar — assim o usuário vê os dois relatórios
+    # mesmo quando o primeiro já falhou (útil pra refatorar tudo de uma vez).
+    test_ok = _lizard_one_file(test_file, label="test",
+                               ccn=ccn, length=length, args=args)
+    src_ok  = True
+    if src_file is not None:
+        src_ok = _lizard_one_file(src_file, label="src",
+                                  ccn=ccn, length=length, args=args)
+
+    overall = test_ok and src_ok
+    if overall:
+        info("Lizard: overall PASS")
+    else:
+        info("Lizard: overall FAIL")
+    return overall

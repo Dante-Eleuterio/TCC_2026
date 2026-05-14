@@ -28,6 +28,7 @@ import shutil
 
 from .helpers import *
 
+
 def get_unity_path() -> Path:
     raw = os.environ.get("UNITY_PATH")
     if not raw:
@@ -44,6 +45,7 @@ def get_unity_path() -> Path:
         die(f"Could not find unity.c inside UNITY_PATH/src: {unity / 'src' / 'unity.c'}")
     return unity
 
+
 def get_filc_path() -> Path:
     raw = os.environ.get("FIL_C_PATH")
     if not raw:
@@ -58,12 +60,18 @@ def get_filc_path() -> Path:
         die(f"FIL_C_PATH points to a non-existent file: {filc}")
     return filc
 
-def check_tools(use_coverage: bool, use_valgrind: bool = False) -> None:
+
+def check_tools(use_coverage: bool, use_valgrind: bool = False, use_lizard: bool = False) -> None:
     tools = ["cmake"]
     if use_coverage:
         tools.append("gcovr")
     if use_valgrind:
         tools.append("valgrind")
+    if use_lizard:
+        tools.append("lizard")
     for tool in tools:
         if not shutil.which(tool):
-            die(f"Required tool not found in PATH: {tool}")
+            hint = ""
+            if tool == "lizard":
+                hint = "\n  Install with: pip install lizard"
+            die(f"Required tool not found in PATH: {tool}{hint}")
