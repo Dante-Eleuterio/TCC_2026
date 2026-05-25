@@ -1052,43 +1052,89 @@ def _valgrind_heap_table(summary: ValgrindSummary, styles: dict) -> Table:
     """
     Tabela compacta com o HEAP SUMMARY do valgrind:
         Allocations | Frees | Bytes allocated | In use at exit
-    Renderizada como 4 colunas (label em cima, valor embaixo), igual em
-    espírito aos 3-cards mas em formato mais discreto pra info auxiliar.
+    Renderizada como 4 colunas (label em cima, valor embaixo).
+
+    Usa Paragraph nas células de valor (não string crua), porque com
+    números muito grandes (10^7+) o texto estoura a largura da coluna e
+    invade as vizinhas — Paragraph faz word-wrap, string crua não. A
+    coluna "in use at exit" é especialmente vulnerável porque combina
+    bytes e blocks; quebra ela em duas linhas pra usar a altura
+    verticalmente em vez da largura horizontal.
+
+    Também dimensiona a fonte dos valores: 14pt como padrão, mas
+    desce pra 11pt quando o número tem 9+ caracteres (1 bilhão de
+    bytes etc) pra evitar que o texto fique apertado.
     """
     h = summary.heap
     leaked = h.allocs - h.frees           # nº de blocos não liberados
 
-    in_use_str = f'{h.in_use_bytes:,} bytes ({h.in_use_blocks:,} blocks)'
-    if h.in_use_bytes == 0 and h.in_use_blocks == 0:
-        in_use_str = '0 bytes (0 blocks)'
-
-    values = [
-        f'{h.allocs:,}',
-        f'{h.frees:,}',
-        f'{h.bytes_allocated:,}',
-        in_use_str,
-    ]
-    labels = ['ALLOCATIONS', 'FREES', 'BYTES ALLOCATED', 'IN USE AT EXIT']
-
-    rows = [values, labels]
-
-    page_width = A4[0] - 30*mm
-    col_w = page_width / 4.0
-    t = Table(rows, colWidths=[col_w]*4, rowHeights=[11*mm, 6*mm])
-
     # Cor da última coluna ("in use at exit"): vermelha se sobrou bloco,
-    # neutra se zerou. Sinaliza visualmente vazamento bruto.
+    # neutra (verde) se zerou. Sinaliza visualmente vazamento bruto.
     leaked_color  = COLOR_FAIL if leaked > 0 else COLOR_PASS
     leaked_bg     = COLOR_VIOL_BG if leaked > 0 else COLOR_PASS_BG
 
+    # Strings de valor; "in use at exit" em DUAS LINHAS pra cabe número
+    # grande sem invadir a coluna anterior.
+    val_allocs = f'{h.allocs:,}'
+    val_frees  = f'{h.frees:,}'
+    val_alloc  = f'{h.bytes_allocated:,}'
+    val_inuse  = (f'{h.in_use_bytes:,} bytes<br/>'
+                  f'<font size="9">({h.in_use_blocks:,} blocks)</font>')
+
+    # Dimensionamento adaptativo: pega o maior número e escolhe font size.
+    # 14pt fica bom até 8 dígitos; acima disso aperta nas colunas estreitas.
+    longest = max(len(val_allocs), len(val_frees), len(val_alloc),
+                  len(f'{h.in_use_bytes:,}'))
+    if   longest <=  8: value_font_size = 14
+    elif longest <= 11: value_font_size = 12
+    else:               value_font_size = 10
+
+    # Estilos pros valores. Wrap 'CJK' é o jeito mais agressivo de quebrar
+    # (em qualquer caractere) — pra números com vírgula isso permite que
+    # "176,292,768" quebre depois de uma vírgula se mesmo a fonte 10pt
+    # ainda apertar.
+    val_style_neutral = ParagraphStyle(
+        'heap_val', parent=styles['mono'],
+        fontName='Helvetica-Bold', fontSize=value_font_size,
+        leading=value_font_size + 2,
+        alignment=1,   # center
+        textColor=COLOR_NEUTRAL,
+        wordWrap='CJK',
+    )
+    val_style_leaked = ParagraphStyle(
+        'heap_val_leak', parent=val_style_neutral,
+        textColor=leaked_color,
+    )
+
+    def _p(s: str, style: ParagraphStyle) -> Paragraph:
+        return Paragraph(s, style)
+
+    values_row = [
+        _p(val_allocs, val_style_neutral),
+        _p(val_frees,  val_style_neutral),
+        _p(val_alloc,  val_style_neutral),
+        _p(val_inuse,  val_style_leaked),
+    ]
+    labels_row = ['ALLOCATIONS', 'FREES', 'BYTES ALLOCATED', 'IN USE AT EXIT']
+
+    page_width = A4[0] - 30*mm
+    # Última coluna um pouco mais larga, porque é a que carrega dois itens
+    # (bytes + blocks). 40% pra ela, 20% pra cada uma das outras três.
+    col_widths = [
+        page_width * 0.20,
+        page_width * 0.20,
+        page_width * 0.25,
+        page_width * 0.35,
+    ]
+    # Altura da linha de valores precisa acomodar 2 linhas no "in use".
+    # 14mm dá folga pra fonte 14pt + linha secundária 9pt sem cortar.
+    t = Table([values_row, labels_row],
+              colWidths=col_widths,
+              rowHeights=[14*mm, 6*mm])
+
     style = [
         # Linha dos valores
-        ('FONTNAME',  (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE',  (0, 0), (-1, 0), 14),
-        ('ALIGN',     (0, 0), (-1, 0), 'CENTER'),
         ('VALIGN',    (0, 0), (-1, 0), 'MIDDLE'),
-        ('TEXTCOLOR', (0, 0), (2, 0), COLOR_NEUTRAL),
-        ('TEXTCOLOR', (3, 0), (3, 0), leaked_color),
         ('BACKGROUND', (0, 0), (2, 0), COLOR_BG_ROW),
         ('BACKGROUND', (3, 0), (3, 0), leaked_bg),
 
@@ -1101,8 +1147,8 @@ def _valgrind_heap_table(summary: ValgrindSummary, styles: dict) -> Table:
         ('BACKGROUND', (0, 1), (2, 1), COLOR_NEUTRAL),
         ('BACKGROUND', (3, 1), (3, 1), leaked_color),
 
-        ('LEFTPADDING',   (0, 0), (-1, -1), 1),
-        ('RIGHTPADDING',  (0, 0), (-1, -1), 1),
+        ('LEFTPADDING',   (0, 0), (-1, -1), 2),
+        ('RIGHTPADDING',  (0, 0), (-1, -1), 2),
         ('TOPPADDING',    (0, 0), (-1, -1), 0),
         ('BOTTOMPADDING', (0, 0), (-1, -1), 0),
     ]
