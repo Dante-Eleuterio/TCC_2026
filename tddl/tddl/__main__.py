@@ -39,15 +39,22 @@ from .run import *
 
 def main() -> None:
     (filename, use_filc, use_coverage, use_valgrind, use_lizard,
-     ccn, length, args_threshold, src_arg) = parse_args()
+     ccn, length, args_threshold, src_arg, build_structure) = parse_args()
 
+        
     check_tools(use_coverage, use_valgrind, use_lizard)
     filc = get_filc_path() if use_filc else None
+
+    root = get_root()
+    if build_structure:
+        ensure_structure(root)
+        sys.exit(0)
 
     unity                     = get_unity_path()
     root, test_dir, test_file = resolve_paths(filename)
     src_file = resolve_src_file(root, src_arg) if src_arg else None
-    ensure_structure(root)
+    
+    
     target     = f"tddl_{test_file.stem}"
     wrap_funcs = extract_wrap_funcs(test_file)
 

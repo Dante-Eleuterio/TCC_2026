@@ -67,7 +67,7 @@ def _parse_int_flag(args: list[str], flag_prefix: str, use_lizard: bool, default
     return value
 
 
-def parse_args() -> tuple[str, bool, bool, bool, bool, int, int, int, str | None]:
+def parse_args() -> tuple[str, bool, bool, bool, bool, int, int, int, str, bool | None]:
     """
     Retorna:
         filename, use_filc, use_coverage, use_valgrind, use_lizard,
@@ -128,7 +128,7 @@ def parse_args() -> tuple[str, bool, bool, bool, bool, int, int, int, str | None
         print("  -Can be combined with any other flag\n")
         print("  -Requires lizard installed: pip install lizard")
         sys.exit(0)
-
+       
     filename     = args[0]
     use_filc     = "--filc"     in args
     use_coverage = "--coverage" in args
@@ -159,5 +159,10 @@ def parse_args() -> tuple[str, bool, bool, bool, bool, int, int, int, str | None
             die("--src requires a filename argument. e.g. --src constroi_nome.c")
         src_file = args[src_index + 1]
 
+    if args[0] in ["--build"]:
+        build_structure = True
+    else:
+        build_structure = False
+        
     return (filename, use_filc, use_coverage, use_valgrind, use_lizard,
-            ccn, length, args_, src_file)
+            ccn, length, args_, src_file, build_structure)

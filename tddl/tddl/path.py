@@ -34,39 +34,53 @@ def get_root() -> Path:
 
 def resolve_paths(arg: str) -> tuple[Path, Path, Path]:
     """
-    Estrutura esperada (achatada):
+    Estrutura esperada (com subpasta por teste):
         project/
         ├── include/
         ├── src/
         └── tests/
-            └── teste1.c   <- direto dentro de tests/
-
+            └── teste1/
+                └── teste1.c   <- dentro de uma subpasta com o mesmo
+                                  nome (sem .c) do arquivo de teste
+ 
     Retorna:
         root      = cwd()
-        test_dir  = cwd()/tests/      <- mesmo diretório para todos os testes
-        test_file = cwd()/tests/<arg>
+        test_dir  = cwd()/tests/<stem>/   <- subpasta específica do teste
+        test_file = cwd()/tests/<stem>/<arg>
+ 
+    O CMakeLists.txt gerado pelo tddl fica em test_dir, isolado por teste,
+    permitindo builds independentes para cada teste.
     """
     filename = Path(arg).name
-
+ 
     if not filename.endswith(".c"):
         die(f"Expected a .c filename, got: {arg}")
-
-    root      = get_root()
-    test_dir  = root / "tests"
-    test_file = test_dir / filename
-
-    if not test_dir.is_dir():
+ 
+    root          = get_root()
+    all_tests_dir = root / "tests"
+    stem          = Path(filename).stem
+    test_dir      = all_tests_dir / stem
+    test_file     = test_dir / filename
+ 
+    if not all_tests_dir.is_dir():
         die(
             f"tests/ directory not found in: {root}\n"
-            f"  Make sure you are running tddl from the project root and the project is built"
+            f"  Make sure you are running tddl from the project root."
         )
-
+ 
+    if not test_dir.is_dir():
+        die(
+            f"Test subdirectory not found: {test_dir}\n"
+            f"  Expected layout: tests/{stem}/{filename}\n"
+            f"  Create the subdirectory and place the .c file inside it."
+        )
+ 
     if not test_file.exists():
         die(
             f"Test file not found: {test_file}\n"
             f"  Please create it manually with your Unity tests inside #ifdef TEST."
         )
-
+ 
     return root, test_dir, test_file
 
 
@@ -81,6 +95,7 @@ def resolve_src_file(root: Path, src_arg: str) -> Path:
         )
 
     return src_file
+
 
 
 def ensure_structure(root: Path) -> None:
