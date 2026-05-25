@@ -61,7 +61,12 @@ def get_filc_path() -> Path:
     return filc
 
 
-def check_tools(use_coverage: bool, use_valgrind: bool = False, use_lizard: bool = False) -> None:
+def check_tools(
+    use_coverage: bool,
+    use_valgrind: bool = False,
+    use_lizard:   bool = False,
+    use_pdf:      bool = False,
+) -> None:
     tools = ["cmake"]
     if use_coverage:
         tools.append("gcovr")
@@ -75,3 +80,17 @@ def check_tools(use_coverage: bool, use_valgrind: bool = False, use_lizard: bool
             if tool == "lizard":
                 hint = "\n  Install with: pip install lizard"
             die(f"Required tool not found in PATH: {tool}{hint}")
+
+    # reportlab é uma biblioteca Python, não um binário no PATH — checamos
+    # via import lazy para dar uma mensagem amigável se faltar.
+    if use_pdf:
+        try:
+            import reportlab  # noqa: F401
+        except ImportError:
+            die(
+                "Python package 'reportlab' is required for --pdf.\n"
+                "  Install with one of:\n"
+                "    pipx install reportlab\n"
+                "    pip install --user reportlab\n"
+                "    pip install --break-system-packages reportlab"
+            )

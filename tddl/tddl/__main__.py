@@ -39,10 +39,11 @@ from .run import *
 
 def main() -> None:
     (filename, use_filc, use_coverage, use_valgrind, use_lizard,
-     ccn, length, args_threshold, src_arg, build_structure,include_raw_list) = parse_args()
+     ccn, length, args_threshold, src_arg, build_structure, include_raw_list,
+     use_pdf) = parse_args()
 
         
-    check_tools(use_coverage, use_valgrind, use_lizard)
+    check_tools(use_coverage, use_valgrind, use_lizard, use_pdf)
     filc = get_filc_path() if use_filc else None
 
     root = get_root()
@@ -79,6 +80,8 @@ def main() -> None:
             parts.append("coverage")
     if use_lizard:
         parts.append(f"lizard(ccn={ccn},length={length},args={args_threshold})")
+    if use_pdf:
+        parts.append("pdf")
     mode = " + ".join(parts) if len(parts) > 1 else parts[0]
 
     info(f"Project  : {root}")
@@ -96,6 +99,12 @@ def main() -> None:
         include_paths_list
     )
 
+    # Caminho do PDF (None se --pdf não foi passado). Padrão:
+    # <project>/reports/<test_stem>/tests.pdf — espelha coverage/<...>/
+    pdf_path: Path | None = None
+    if use_pdf:
+        pdf_path = root / "reports" / test_file.stem / "tests.pdf"
+
     tests_passed  = False
     coverage_full = True
     lizard_clean  = True
@@ -105,9 +114,15 @@ def main() -> None:
         cmake_build(build_dir, target)
 
         if use_valgrind:
-            tests_passed = run_tests_valgrind(build_dir, target)
+            tests_passed = run_tests_valgrind(
+                build_dir, target,
+                pdf_path=pdf_path, test_file=test_file, mode=mode,
+            )
         else:
-            tests_passed = run_tests(build_dir, target)
+            tests_passed = run_tests(
+                build_dir, target,
+                pdf_path=pdf_path, test_file=test_file, mode=mode,
+            )
 
         if use_coverage:
             # Passamos src_file ao gcovr: quando presente, ele

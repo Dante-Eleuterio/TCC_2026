@@ -8,6 +8,7 @@ tddl/enviroment.py
 tddl/helpers.py
 tddl/old_tddl.py
 tddl/path.py
+tddl/reports.py
 tddl/run.py
 tddl.egg-info/PKG-INFO
 tddl.egg-info/SOURCES.txt

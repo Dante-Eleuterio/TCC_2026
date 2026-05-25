@@ -47,22 +47,91 @@ def _resolve_executable(build_dir: Path, target: str) -> Path:
     return executable
 
 
-def run_tests(build_dir: Path, target: str) -> bool:
+def _emit_unity_pdf(captured: str, pdf_path: Path, test_file: Path, mode: str) -> None:
+    """
+    Parseia o output Unity, gera o PDF e imprime sumário curto + path do PDF.
+    Import lazy do reports para que tddl funcione sem reportlab quando
+    --pdf não é usado (a checagem do reportlab é feita em enviroment.py).
+    """
+    from .reports import parse_unity_output, generate_unity_pdf
+
+    summary = parse_unity_output(captured)
+    generate_unity_pdf(
+        output_path=pdf_path,
+        test_file=test_file,
+        mode=mode,
+        summary=summary,
+    )
+
+    overall = "OK" if summary.overall_ok else "FAIL"
+    passed  = summary.total - summary.failures - summary.ignored
+    info(
+        f"{summary.total} tests, {passed} passed, "
+        f"{summary.failures} failed, {summary.ignored} ignored — {overall}"
+    )
+    info(f"PDF report: {pdf_path}")
+
+
+def run_tests(
+    build_dir: Path,
+    target:    str,
+    pdf_path:  Path | None = None,
+    test_file: Path | None = None,
+    mode:      str  = "gcc",
+) -> bool:
+    """
+    Roda o executável de testes Unity.
+
+    pdf_path=None  -> comportamento clássico: output ao vivo no terminal.
+    pdf_path=Path  -> captura stdout, gera PDF, imprime só sumário curto.
+    """
     executable = _resolve_executable(build_dir, target)
 
     info(f"Running tests: {executable}")
     print()
-    result = subprocess.run([str(executable), "-v"])
-    print()
+
+    if pdf_path is None:
+        result = subprocess.run([str(executable), "-v"])
+        print()
+        return result.returncode == 0
+
+    result = subprocess.run(
+        [str(executable), "-v"],
+        capture_output=True, text=True,
+    )
+    # Sem test_file não dá pra montar o PDF; cai no comportamento antigo + warning.
+    if test_file is None:
+        print(result.stdout, end="")
+        if result.stderr:
+            print(result.stderr, end="")
+        info("WARNING: --pdf requested but test_file not provided; skipping PDF.")
+        return result.returncode == 0
+
+    _emit_unity_pdf(result.stdout, pdf_path, test_file, mode)
     return result.returncode == 0
 
 
-def run_tests_valgrind(build_dir: Path, target: str) -> bool:
+def run_tests_valgrind(
+    build_dir: Path,
+    target:    str,
+    pdf_path:  Path | None = None,
+    test_file: Path | None = None,
+    mode:      str  = "gcc + valgrind",
+) -> bool:
+    """
+    Roda o executável sob valgrind. --error-exitcode=1 faz o processo
+    sair com 1 se houver erro de memória, mesmo com testes Unity ok.
+
+    Quando --pdf está ativo, gera apenas o PDF dos testes Unity (o
+    relatório do valgrind em si fica para uma etapa futura). Os
+    diagnósticos do valgrind continuam sendo impressos no terminal.
+    """
     executable = _resolve_executable(build_dir, target)
 
     info(f"Running tests under valgrind: {executable}")
     print()
-    result = subprocess.run([
+
+    cmd = [
         "valgrind",
         "--leak-check=full",
         "--show-leak-kinds=all",
@@ -70,8 +139,29 @@ def run_tests_valgrind(build_dir: Path, target: str) -> bool:
         "--error-exitcode=1",
         str(executable),
         "-v",
-    ])
-    print()
+    ]
+
+    if pdf_path is None:
+        result = subprocess.run(cmd)
+        print()
+        return result.returncode == 0
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+
+    if test_file is None:
+        print(result.stdout, end="")
+        if result.stderr:
+            print(result.stderr, end="")
+        info("WARNING: --pdf requested but test_file not provided; skipping PDF.")
+        return result.returncode == 0
+
+    _emit_unity_pdf(result.stdout, pdf_path, test_file, mode)
+
+    # Valgrind escreve em stderr; mantém visível para o usuário.
+    if result.stderr.strip():
+        print()
+        info("valgrind diagnostics (stderr):")
+        print(result.stderr, end="")
     return result.returncode == 0
 
 
@@ -107,9 +197,6 @@ def run_gcovr(
     html_output = test_coverage_dir / "index.html"
     json_output = test_coverage_dir / "summary.json"
 
-    # Filtro: quando há src_file, restringimos a análise a ele.
-    # gcovr aceita --filter <regex>; usamos re.escape para tratar o
-    # path como literal (evita interpretação de "." e outros metachars).
     filter_args: list[str] = []
     if src_file is not None:
         filter_pattern = re.escape(str(src_file.resolve()))
@@ -121,7 +208,6 @@ def run_gcovr(
     info("Running gcovr...")
     print()
 
-    # Terminal summary
     subprocess.run([
         "gcovr",
         "--root", str(root),
@@ -129,7 +215,6 @@ def run_gcovr(
         str(build_dir),
     ])
 
-    # JSON summary
     subprocess.run([
         "gcovr",
         "--root", str(root),
@@ -139,7 +224,6 @@ def run_gcovr(
         str(build_dir),
     ])
 
-    # HTML report
     subprocess.run([
         "gcovr",
         "--root", str(root),
@@ -170,9 +254,6 @@ def run_gcovr(
         info("Coverage JSON missing 'line_percent' — treating as incomplete coverage.")
         return False
 
-    # Caso edge: --filter pode não bater em nada se o build dir não tiver
-    # gcov data do src_file (improvável, mas vale alertar em vez de
-    # silenciosamente reportar 100%).
     if lines_total == 0:
         if src_file is not None:
             info(f"WARNING: gcovr reported 0 lines for {src_file.name}. "

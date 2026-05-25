@@ -67,7 +67,7 @@ def _parse_int_flag(args: list[str], flag_prefix: str, use_lizard: bool, default
     return value
 
 
-def parse_args() -> tuple[str, bool, bool, bool, bool, int, int, int, str, bool, list[str]]:
+def parse_args() -> tuple[str, bool, bool, bool, bool, int, int, int, str, bool, list[str], bool]:
    
     args = sys.argv[1:]
 
@@ -123,6 +123,14 @@ def parse_args() -> tuple[str, bool, bool, bool, bool, int, int, int, str, bool,
         print("  -If any function exceeds the thresholds, tddl exits with code != 0\n")
         print("  -Can be combined with any other flag\n")
         print("  -Requires lizard installed: pip install lizard")
+
+        print("Usage: $tddl <test_file.c> --pdf")
+        print("  -Generates a PDF report for the Unity test results.")
+        print("  -When --pdf is set, the terminal shows only a short summary")
+        print("   plus the path to the PDF; full output is captured into the PDF.")
+        print("  -PDF is written to: <project>/reports/<test_stem>/tests.pdf")
+        print("  -Can be combined with any other flag.")
+        print("  -Requires reportlab installed: pip install reportlab")
         sys.exit(0)
        
     filename     = args[0]
@@ -130,6 +138,7 @@ def parse_args() -> tuple[str, bool, bool, bool, bool, int, int, int, str, bool,
     use_coverage = "--coverage" in args
     use_valgrind = "--valgrind" in args
     use_lizard   = "--lizard"   in args
+    use_pdf      = "--pdf"      in args
 
     if use_filc and use_coverage:
         die("--filc and --coverage cannot be used together")
@@ -177,4 +186,4 @@ def parse_args() -> tuple[str, bool, bool, bool, bool, int, int, int, str, bool,
                 include_files.append(f.strip())
 
     return (filename, use_filc, use_coverage, use_valgrind, use_lizard,
-            ccn, length, args_, src_file, build_structure,include_files)
+            ccn, length, args_, src_file, build_structure, include_files, use_pdf)
