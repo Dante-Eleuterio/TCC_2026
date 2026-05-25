@@ -67,7 +67,7 @@ def _parse_int_flag(args: list[str], flag_prefix: str, use_lizard: bool, default
     return value
 
 
-def parse_args() -> tuple[str, bool, bool, bool, bool, int, int, int, str, bool | None]:
+def parse_args() -> tuple[str, bool, bool, bool, bool, int, int, int, str, bool, list[str]]:
    
     args = sys.argv[1:]
 
@@ -160,7 +160,21 @@ def parse_args() -> tuple[str, bool, bool, bool, bool, int, int, int, str, bool 
     else:
         build_structure = False
     
+    include_files = []
 
+    if "--include" in args:
+        idx = args.index("--include")
+
+        if idx + 1 >= len(args):
+            raise ValueError("--include requires a files lists separeted by comma. Example: --include mocks.c, helpers.c")
+
+        include_arg = args[idx + 1]
+
+        include_files = []
+
+        for f in include_arg.split(","):
+            if f.strip():
+                include_files.append(f.strip())
 
     return (filename, use_filc, use_coverage, use_valgrind, use_lizard,
-            ccn, length, args_, src_file, build_structure)
+            ccn, length, args_, src_file, build_structure,include_files)

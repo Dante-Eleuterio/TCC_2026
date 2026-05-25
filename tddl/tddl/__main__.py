@@ -39,7 +39,7 @@ from .run import *
 
 def main() -> None:
     (filename, use_filc, use_coverage, use_valgrind, use_lizard,
-     ccn, length, args_threshold, src_arg, build_structure) = parse_args()
+     ccn, length, args_threshold, src_arg, build_structure,include_raw_list) = parse_args()
 
         
     check_tools(use_coverage, use_valgrind, use_lizard)
@@ -55,8 +55,16 @@ def main() -> None:
     ensure_structure(root)
     root, test_dir, test_file = resolve_paths(filename)
     src_file = resolve_src_file(root, src_arg) if src_arg else None
+    include_paths_list = find_includes(root, include_raw_list)
+
     target     = f"tddl_{test_file.stem}"
-    wrap_funcs = extract_wrap_funcs(test_file)
+
+    files_to_scan = [test_file]
+    if src_file:
+        files_to_scan.append(src_file)
+    files_to_scan.extend(include_paths_list)
+
+    wrap_funcs = extract_wrap_funcs(files_to_scan)
 
     build_dir = Path(tempfile.mkdtemp(prefix="tddl_build_"))
 
@@ -81,9 +89,11 @@ def main() -> None:
     info(f"Build    : {build_dir}")
     print()
 
+    
     generate_cmakelists(
         root, test_dir, test_file, unity,
-        use_coverage, use_filc, filc, src_file, wrap_funcs,
+        use_coverage, use_filc, filc, src_file, wrap_funcs, 
+        include_paths_list
     )
 
     tests_passed  = False
@@ -100,17 +110,13 @@ def main() -> None:
             tests_passed = run_tests(build_dir, target)
 
         if use_coverage:
-            if not tests_passed:
-                info("Tests FAILED — skipping gcovr.")
-                coverage_full = False
-            else:
-                # Passamos src_file ao gcovr: quando presente, ele
-                # filtra a cobertura para considerar apenas o código
-                # de produção (ignora test_file e dependências).
-                coverage_full = run_gcovr(
-                    root, build_dir, test_file, test_dir,
-                    src_file=src_file,
-                )
+            # Passamos src_file ao gcovr: quando presente, ele
+            # filtra a cobertura para considerar apenas o código
+            # de produção (ignora test_file e dependências).
+            coverage_full = run_gcovr(
+                root, build_dir, test_file, test_dir,
+                src_file=src_file,
+            )
         elif not tests_passed:
             info("Tests FAILED ")
 

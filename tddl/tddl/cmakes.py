@@ -42,6 +42,7 @@ def generate_cmakelists(
     filc:         Path | None,
     src_file:     Path | None = None,
     wrap_funcs:   list[str]   = [],
+    include_list: list[str]   = []
 ) -> None:
     cmake_path = test_dir / "CMakeLists.txt"
 
@@ -61,8 +62,15 @@ def generate_cmakelists(
         if use_filc else ""
     )
 
-    # Optional separate source file (Structure B)
-    src_file_line = f"    {src_file}\n" if src_file else ""
+    extra_sources = ""
+
+    if src_file:
+        extra_sources += f"    {src_file}\n"
+
+    extra_sources += "".join(
+        f"    {inc}\n"
+        for inc in include_list
+    )
 
     # Coverage flags — only when --coverage is passed
     if use_coverage:
@@ -132,7 +140,7 @@ set(UNITY_INC {unity_inc})
 add_executable({target}
     {test_file}
     {unity_src}
-{src_file_line})
+{extra_sources})
 
 target_include_directories({target} PRIVATE
     ${{INC_DIR}}

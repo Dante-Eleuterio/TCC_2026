@@ -134,22 +134,45 @@ def create_structure(root: Path) -> None:
         info("Project structure already exists — no directories created.")
 
 
-def extract_wrap_funcs(test_file: Path) -> list[str]:
-    source = test_file.read_text()
-
-    # matches: any return type, then __wrap_funcname, then (
+def extract_wrap_funcs(files: list[Path | str]) -> list[str]:
     pattern = re.compile(r'\b__wrap_(\w+)\s*\(')
-    matches = pattern.findall(source)
 
-    # deduplicate while preserving order
     seen = set()
     wrap_funcs = []
-    for fn in matches:
-        if fn not in seen:
-            seen.add(fn)
-            wrap_funcs.append(fn)
+
+    for file in files:
+        file = Path(file)
+
+        source = file.read_text()
+
+        matches = pattern.findall(source)
+
+        for fn in matches:
+            if fn not in seen:
+                seen.add(fn)
+                wrap_funcs.append(fn)
 
     if wrap_funcs:
         info(f"Found wrapped functions: {', '.join(wrap_funcs)}")
 
     return wrap_funcs
+
+def find_includes(root: Path, raw_list: list[str]) -> list[str]:
+    include_dir = root / "include"
+
+    include_paths = []
+    missing_files = []
+
+    for name in raw_list:
+        full_path = include_dir / name
+
+        if not full_path.exists():
+            missing_files.append(name)
+        else:
+            include_paths.append(str(full_path))
+
+    if missing_files:
+        names_list = ", ".join(missing_files)
+        die(f"Included files '{names_list}' do not exist.")
+
+    return include_paths
