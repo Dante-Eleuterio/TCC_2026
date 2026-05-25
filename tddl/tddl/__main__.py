@@ -28,6 +28,7 @@ tddl - TDD launcher for Unity-based C tests with gcovr coverage.
 """
 import sys
 import tempfile
+from datetime import datetime
 from pathlib import Path
 from .arguments import *
 from .cmakes import *
@@ -42,7 +43,6 @@ def main() -> None:
      ccn, length, args_threshold, src_arg, build_structure, include_raw_list,
      use_pdf) = parse_args()
 
-        
     check_tools(use_coverage, use_valgrind, use_lizard, use_pdf)
     filc = get_filc_path() if use_filc else None
 
@@ -52,13 +52,13 @@ def main() -> None:
         sys.exit(0)
 
     unity                     = get_unity_path()
-    
+
     ensure_structure(root)
     root, test_dir, test_file = resolve_paths(filename)
     src_file = resolve_src_file(root, src_arg) if src_arg else None
     include_paths_list = find_includes(root, include_raw_list)
 
-    target     = f"tddl_{test_file.stem}"
+    target = f"tddl_{test_file.stem}"
 
     files_to_scan = [test_file]
     if src_file:
@@ -92,18 +92,27 @@ def main() -> None:
     info(f"Build    : {build_dir}")
     print()
 
-    
     generate_cmakelists(
         root, test_dir, test_file, unity,
-        use_coverage, use_filc, filc, src_file, wrap_funcs, 
+        use_coverage, use_filc, filc, src_file, wrap_funcs,
         include_paths_list
     )
 
-    # Caminho do PDF (None se --pdf não foi passado). Padrão:
-    # <project>/reports/<test_stem>/tests.pdf — espelha coverage/<...>/
-    pdf_path: Path | None = None
+    # ---------------- PDF setup ----------------
+    # Quando --pdf está ativo, as funções run_* recebem listas onde
+    # depositam seus Summary objects. Depois de tudo rodar, montamos
+    # o PDF combinado chamando reports.generate_combined_pdf.
+    #
+    # Path: <project>/reports/<test_stem>/report.pdf
+    # (genérico — não "tests.pdf" porque o relatório agora cobre todas
+    # as ferramentas, não só os testes Unity)
+    report_pdf_path: Path | None = None
+    unity_pdf_list:  list = []
+    lizard_pdf_list: list = []
+    run_dt = datetime.now()   # timestamp consistente entre logs e PDF
+
     if use_pdf:
-        pdf_path = root / "reports" / test_file.stem / "tests.pdf"
+        report_pdf_path = root / "reports" / test_file.stem / "report.pdf"
 
     tests_passed  = False
     coverage_full = True
@@ -116,33 +125,54 @@ def main() -> None:
         if use_valgrind:
             tests_passed = run_tests_valgrind(
                 build_dir, target,
-                pdf_path=pdf_path, test_file=test_file, mode=mode,
+                pdf_collect=(unity_pdf_list if use_pdf else None),
             )
         else:
             tests_passed = run_tests(
                 build_dir, target,
-                pdf_path=pdf_path, test_file=test_file, mode=mode,
+                pdf_collect=(unity_pdf_list if use_pdf else None),
             )
 
         if use_coverage:
-            # Passamos src_file ao gcovr: quando presente, ele
-            # filtra a cobertura para considerar apenas o código
-            # de produção (ignora test_file e dependências).
+            # gcovr filtra a cobertura ao src_file quando presente,
+            # ignorando arquivos de teste.
             coverage_full = run_gcovr(
                 root, build_dir, test_file, test_dir,
                 src_file=src_file,
             )
         elif not tests_passed:
-            info("Tests FAILED ")
+            info("Tests FAILED")
 
         if use_lizard:
             lizard_clean = run_lizard(
                 test_file, src_file,
                 ccn=ccn, length=length, args=args_threshold,
+                pdf_collect=(lizard_pdf_list if use_pdf else None),
             )
 
     finally:
         cleanup(build_dir)
+
+    # ---------------- Geração do PDF combinado ----------------
+    # Mesmo se alguma ferramenta tiver falhado, geramos o PDF com o que
+    # foi coletado — o PDF é diagnóstico, não cabe a ele exigir sucesso.
+    # Cada summary é None se a ferramenta não rodou ou não populou nada.
+    if use_pdf:
+        from .reports import generate_combined_pdf
+
+        unity_summary  = unity_pdf_list[0]  if unity_pdf_list  else None
+        lizard_summary = lizard_pdf_list[0] if lizard_pdf_list else None
+
+        generate_combined_pdf(
+            output_path=report_pdf_path,
+            test_file=test_file,
+            src_file=src_file,
+            mode=mode,
+            run_dt=run_dt,
+            unity=unity_summary,
+            lizard=lizard_summary,
+        )
+        info(f"PDF report: {report_pdf_path}")
 
     success = tests_passed
     if use_coverage:

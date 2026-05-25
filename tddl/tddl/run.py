@@ -47,21 +47,38 @@ def _resolve_executable(build_dir: Path, target: str) -> Path:
     return executable
 
 
-def _emit_unity_pdf(captured: str, pdf_path: Path, test_file: Path, mode: str) -> None:
+# ----------------------------------------------------------------------------
+#  Padrão de out-parameter para coleta de summaries
+# ----------------------------------------------------------------------------
+#
+# Quando `--pdf` está ativo, o __main__ cria uma lista por ferramenta e
+# passa adiante. Cada `run_*` faz `out.append(summary)` se for chamado.
+# No final, o __main__ chama generate_combined_pdf com tudo que foi
+# coletado.
+#
+# Esse padrão tem duas vantagens sobre mudar o tipo de retorno:
+#   1. Não quebra callers existentes (retorno continua sendo bool).
+#   2. Funções podem opcionalmente popular múltiplos summaries (ex: lizard
+#      adiciona test_file e src_file separados, então usa list mesmo).
+#
+# Quando `pdf_collect` é None (modo sem --pdf), não capturamos a saída;
+# tudo segue ao vivo no terminal como antes.
+# ----------------------------------------------------------------------------
+
+
+def _process_captured_unity(captured: str, pdf_collect: list | None) -> bool:
     """
-    Parseia o output Unity, gera o PDF e imprime sumário curto + path do PDF.
-    Import lazy do reports para que tddl funcione sem reportlab quando
-    --pdf não é usado (a checagem do reportlab é feita em enviroment.py).
+    Parseia stdout Unity capturado, popula pdf_collect com UnitySummary,
+    imprime sumário curto no terminal. Retorna True se todos os asserts
+    passaram.
+
+    Import lazy do reports — sem --pdf a função não é chamada.
     """
-    from .reports import parse_unity_output, generate_unity_pdf
+    from .reports import parse_unity_output
 
     summary = parse_unity_output(captured)
-    generate_unity_pdf(
-        output_path=pdf_path,
-        test_file=test_file,
-        mode=mode,
-        summary=summary,
-    )
+    if pdf_collect is not None:
+        pdf_collect.append(summary)
 
     overall = "OK" if summary.overall_ok else "FAIL"
     passed  = summary.total - summary.failures - summary.ignored
@@ -69,28 +86,27 @@ def _emit_unity_pdf(captured: str, pdf_path: Path, test_file: Path, mode: str) -
         f"{summary.total} tests, {passed} passed, "
         f"{summary.failures} failed, {summary.ignored} ignored — {overall}"
     )
-    info(f"PDF report: {pdf_path}")
+    return summary.overall_ok
 
 
 def run_tests(
-    build_dir: Path,
-    target:    str,
-    pdf_path:  Path | None = None,
-    test_file: Path | None = None,
-    mode:      str  = "gcc",
+    build_dir:   Path,
+    target:      str,
+    pdf_collect: list | None = None,
 ) -> bool:
     """
     Roda o executável de testes Unity.
 
-    pdf_path=None  -> comportamento clássico: output ao vivo no terminal.
-    pdf_path=Path  -> captura stdout, gera PDF, imprime só sumário curto.
+    pdf_collect=None  -> comportamento clássico: output ao vivo no terminal.
+    pdf_collect=[]    -> captura stdout, popula list com UnitySummary,
+                          imprime só sumário curto.
     """
     executable = _resolve_executable(build_dir, target)
 
     info(f"Running tests: {executable}")
     print()
 
-    if pdf_path is None:
+    if pdf_collect is None:
         result = subprocess.run([str(executable), "-v"])
         print()
         return result.returncode == 0
@@ -99,32 +115,24 @@ def run_tests(
         [str(executable), "-v"],
         capture_output=True, text=True,
     )
-    # Sem test_file não dá pra montar o PDF; cai no comportamento antigo + warning.
-    if test_file is None:
-        print(result.stdout, end="")
-        if result.stderr:
-            print(result.stderr, end="")
-        info("WARNING: --pdf requested but test_file not provided; skipping PDF.")
-        return result.returncode == 0
-
-    _emit_unity_pdf(result.stdout, pdf_path, test_file, mode)
+    # Em modo --pdf, exit code do Unity é a fonte da verdade para
+    # tests_passed (não confunde com erro de parsing).
+    _process_captured_unity(result.stdout, pdf_collect)
     return result.returncode == 0
 
 
 def run_tests_valgrind(
-    build_dir: Path,
-    target:    str,
-    pdf_path:  Path | None = None,
-    test_file: Path | None = None,
-    mode:      str  = "gcc + valgrind",
+    build_dir:   Path,
+    target:      str,
+    pdf_collect: list | None = None,
 ) -> bool:
     """
-    Roda o executável sob valgrind. --error-exitcode=1 faz o processo
-    sair com 1 se houver erro de memória, mesmo com testes Unity ok.
+    Roda sob valgrind. --error-exitcode=1 garante exit !=0 em erro de
+    memória mesmo com testes Unity ok.
 
-    Quando --pdf está ativo, gera apenas o PDF dos testes Unity (o
-    relatório do valgrind em si fica para uma etapa futura). Os
-    diagnósticos do valgrind continuam sendo impressos no terminal.
+    Em modo --pdf, captura o stdout (output Unity) para o relatório.
+    Os diagnósticos do valgrind (stderr) continuam visíveis no terminal.
+    O PDF do valgrind em si fica para uma etapa futura.
     """
     executable = _resolve_executable(build_dir, target)
 
@@ -141,21 +149,13 @@ def run_tests_valgrind(
         "-v",
     ]
 
-    if pdf_path is None:
+    if pdf_collect is None:
         result = subprocess.run(cmd)
         print()
         return result.returncode == 0
 
     result = subprocess.run(cmd, capture_output=True, text=True)
-
-    if test_file is None:
-        print(result.stdout, end="")
-        if result.stderr:
-            print(result.stderr, end="")
-        info("WARNING: --pdf requested but test_file not provided; skipping PDF.")
-        return result.returncode == 0
-
-    _emit_unity_pdf(result.stdout, pdf_path, test_file, mode)
+    _process_captured_unity(result.stdout, pdf_collect)
 
     # Valgrind escreve em stderr; mantém visível para o usuário.
     if result.stderr.strip():
@@ -176,15 +176,8 @@ def run_gcovr(
     Roda o gcovr e retorna True se a cobertura de linhas for 100%.
 
     Quando src_file é fornecido, o gcovr é restrito a esse arquivo via
-    --filter. Cobertura de arquivos de teste, headers do Unity, etc.,
-    é ignorada — apenas o código de produção é medido. Sem src_file
-    (estrutura A, código embutido no test_file), mede o test_file
-    direto, mas isso geralmente dá 100% trivialmente.
-
-    Sempre gera:
-      - resumo em texto no terminal
-      - summary.json (lido para decidir pass/fail)
-      - relatório HTML em project/coverage/<test_dir>/index.html
+    --filter. Sempre gera resumo no terminal, summary.json, e relatório
+    HTML em project/coverage/<test_dir>/index.html.
     """
     coverages_dir = root / "coverage"
     coverages_dir.mkdir(exist_ok=True)
@@ -272,7 +265,17 @@ def run_gcovr(
         return False
 
 
-def _lizard_one_file(target: Path, label: str, ccn: int, length: int, args: int) -> bool:
+# ----------------------------------------------------------------------------
+#  Lizard
+# ----------------------------------------------------------------------------
+
+def _lizard_one_file_textual(
+    target: Path, label: str, ccn: int, length: int, args: int,
+) -> bool:
+    """
+    Comportamento legado (sem --pdf): roda lizard duas vezes — uma para
+    relatório textual no terminal, outra com -w para capturar exit code.
+    """
     header = f"─── lizard: {label} ({target.name}) ─────────────────────────────"
     print(header)
 
@@ -293,8 +296,7 @@ def _lizard_one_file(target: Path, label: str, ccn: int, length: int, args: int)
             "-w",
             str(target),
         ],
-        capture_output=True,
-        text=True,
+        capture_output=True, text=True,
     )
 
     print()
@@ -311,30 +313,93 @@ def _lizard_one_file(target: Path, label: str, ccn: int, length: int, args: int)
         return False
 
 
-def run_lizard(
-    test_file: Path,
-    src_file:  Path | None,
-    ccn:       int = DEFAULT_LIZARD_CCN,
-    length:    int = DEFAULT_LIZARD_LENGTH,
-    args:      int = DEFAULT_LIZARD_ARGS,
+def _lizard_one_file_csv(
+    target:   Path,
+    label:    str,
+    ccn:      int,
+    length:   int,
+    args:     int,
+    files_out: list,   # populated with LizardFileReport
 ) -> bool:
-    info(
-        f"Lizard thresholds: CCN <= {ccn}, "
-        f"length <= {length}, "
-        f"args <= {args}"
-    )
-    print()
+    """
+    Modo --pdf: roda lizard --csv, parseia, popula files_out com
+    LizardFileReport, imprime sumário curto.
+    """
+    from .reports import parse_lizard_csv, LizardFileReport
 
-    test_ok = _lizard_one_file(test_file, label="test",
-                               ccn=ccn, length=length, args=args)
-    src_ok  = True
+    result = subprocess.run(
+        [
+            "lizard", "--csv",
+            "-C", str(ccn),
+            "-L", str(length),
+            "-a", str(args),
+            str(target),
+        ],
+        capture_output=True, text=True,
+    )
+    functions = parse_lizard_csv(result.stdout, ccn, length, args)
+    file_report = LizardFileReport(
+        label=label, file_path=target, functions=functions,
+    )
+    files_out.append(file_report)
+
+    if file_report.clean:
+        info(f"Lizard [{label}]: {file_report.total_functions} functions, "
+             f"all within thresholds — PASS")
+        return True
+    else:
+        info(f"Lizard [{label}]: {file_report.total_functions} functions, "
+             f"{file_report.violating_functions} violations — FAIL")
+        return False
+
+
+def run_lizard(
+    test_file:   Path,
+    src_file:    Path | None,
+    ccn:         int = DEFAULT_LIZARD_CCN,
+    length:      int = DEFAULT_LIZARD_LENGTH,
+    args:        int = DEFAULT_LIZARD_ARGS,
+    pdf_collect: list | None = None,
+) -> bool:
+    """
+    Roda lizard no test_file e (opcionalmente) no src_file.
+
+    pdf_collect=None  -> imprime relatório textual no terminal.
+    pdf_collect=[]    -> roda em modo CSV silencioso, popula com
+                          LizardSummary (uma única entrada que contém
+                          os LizardFileReport por arquivo).
+    """
+    if pdf_collect is None:
+        info(f"Lizard thresholds: CCN <= {ccn}, length <= {length}, args <= {args}")
+        print()
+
+        test_ok = _lizard_one_file_textual(test_file, label="test",
+                                           ccn=ccn, length=length, args=args)
+        src_ok = True
+        if src_file is not None:
+            src_ok = _lizard_one_file_textual(src_file, label="src",
+                                              ccn=ccn, length=length, args=args)
+
+        overall = test_ok and src_ok
+        info("Lizard: overall PASS" if overall else "Lizard: overall FAIL")
+        return overall
+
+    # Modo --pdf
+    from .reports import LizardSummary
+
+    info(f"Lizard thresholds: CCN <= {ccn}, length <= {length}, args <= {args}")
+
+    files_out: list = []
+    test_ok = _lizard_one_file_csv(test_file, "test", ccn, length, args, files_out)
+    src_ok = True
     if src_file is not None:
-        src_ok = _lizard_one_file(src_file, label="src",
-                                  ccn=ccn, length=length, args=args)
+        src_ok = _lizard_one_file_csv(src_file, "src", ccn, length, args, files_out)
+
+    summary = LizardSummary(
+        files=files_out, ccn_th=ccn, length_th=length, args_th=args,
+    )
+    pdf_collect.append(summary)
 
     overall = test_ok and src_ok
-    if overall:
-        info("Lizard: overall PASS")
-    else:
-        info("Lizard: overall FAIL")
+    info("Lizard: overall PASS" if overall else "Lizard: overall FAIL")
     return overall

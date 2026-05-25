@@ -23,28 +23,26 @@
 # OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 """
-Geração de relatórios em PDF a partir das saídas das ferramentas.
+Geração de relatório PDF unificado.
 
-Este módulo contém:
-  - Parsers que convertem texto bruto em estruturas tipadas.
-  - Geradores que pegam essas estruturas e produzem PDFs.
+Estrutura geral:
+  - dataclasses tipadas com os resultados de cada ferramenta (Unity, Lizard,
+    futuramente Coverage e Valgrind)
+  - parsers que convertem saída crua das ferramentas → dataclasses
+  - geradores de seções (uma função por ferramenta) que produzem listas de
+    Flowables do reportlab
+  - generate_combined_pdf(): a única entry-point pública usada pelo
+    __main__. Recebe as estruturas e monta o PDF inteiro numa página.
 
-A ideia é manter o parsing separado do rendering, para que possamos
-testar cada parte isoladamente e adicionar outros formatos (HTML, JSON)
-no futuro sem mexer no parsing.
-
-Atualmente implementado:
-  - Unity (testes)
-
-Próximos:
-  - gcovr (cobertura)
-  - valgrind (memória)
-  - lizard (complexidade)
+Quando uma ferramenta não foi executada, o caller passa None no lugar
+do summary correspondente e a seção é simplesmente omitida.
 """
 from __future__ import annotations
 
+import csv
+import io
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -53,21 +51,66 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import mm
 from reportlab.platypus import (
-    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak,
 )
 
 
 # ============================================================================
-#  Paleta de cores compartilhada entre relatórios
+#  Paleta compartilhada
 # ============================================================================
 
-COLOR_PASS    = colors.HexColor('#1b7f3a')   # verde escuro
-COLOR_FAIL    = colors.HexColor('#c0392b')   # vermelho escuro
-COLOR_IGNORE  = colors.HexColor('#b58900')   # âmbar
-COLOR_NEUTRAL = colors.HexColor('#2c3e50')   # cinza azulado
-COLOR_MUTED   = colors.HexColor('#7f8c8d')   # cinza claro
-COLOR_BG_ROW  = colors.HexColor('#f4f6f7')   # cinza muito claro (zebrado)
-COLOR_HEADER  = colors.HexColor('#34495e')   # cabeçalho de tabela
+COLOR_PASS    = colors.HexColor('#1b7f3a')
+COLOR_FAIL    = colors.HexColor('#c0392b')
+COLOR_IGNORE  = colors.HexColor('#b58900')
+COLOR_NEUTRAL = colors.HexColor('#2c3e50')
+COLOR_MUTED   = colors.HexColor('#7f8c8d')
+COLOR_BG_ROW  = colors.HexColor('#f4f6f7')
+COLOR_HEADER  = colors.HexColor('#34495e')
+COLOR_VIOL_BG = colors.HexColor('#fdedec')
+COLOR_PASS_BG = colors.HexColor('#eafaf1')
+COLOR_FAIL_BG = colors.HexColor('#fdedec')
+COLOR_IGN_BG  = colors.HexColor('#fef9e7')
+
+
+# Sequências ANSI (cores no terminal) que o Unity injeta com
+# UNITY_OUTPUT_COLOR. Removidas antes do parsing.
+_ANSI_ESCAPE = re.compile(r'\x1b\[[0-9;]*[A-Za-z]')
+
+
+# ============================================================================
+#  Estilos compartilhados
+# ============================================================================
+
+def _make_styles() -> dict[str, ParagraphStyle]:
+    base = getSampleStyleSheet()
+    return {
+        'title': ParagraphStyle(
+            'Title', parent=base['Title'], fontName='Helvetica-Bold',
+            fontSize=22, textColor=COLOR_NEUTRAL, spaceAfter=2*mm, alignment=0,
+        ),
+        'subtitle': ParagraphStyle(
+            'Subtitle', parent=base['Normal'], fontName='Helvetica',
+            fontSize=10, textColor=COLOR_MUTED, spaceAfter=6*mm,
+        ),
+        'section': ParagraphStyle(
+            'Section', parent=base['Heading2'], fontName='Helvetica-Bold',
+            fontSize=14, textColor=COLOR_NEUTRAL,
+            spaceBefore=6*mm, spaceAfter=3*mm,
+        ),
+        'subsection': ParagraphStyle(
+            'Subsection', parent=base['Heading3'], fontName='Helvetica-Bold',
+            fontSize=11, textColor=COLOR_NEUTRAL,
+            spaceBefore=3*mm, spaceAfter=2*mm,
+        ),
+        'mono': ParagraphStyle(
+            'Mono', parent=base['Normal'], fontName='Courier',
+            fontSize=8, textColor=COLOR_NEUTRAL, leading=10, wordWrap='CJK',
+        ),
+        'small_muted': ParagraphStyle(
+            'SmallMuted', parent=base['Normal'], fontName='Helvetica',
+            fontSize=9, textColor=COLOR_MUTED, spaceAfter=2*mm,
+        ),
+    }
 
 
 # ============================================================================
@@ -76,11 +119,11 @@ COLOR_HEADER  = colors.HexColor('#34495e')   # cabeçalho de tabela
 
 @dataclass
 class UnityTest:
-    file:    str   # caminho do arquivo de teste
-    line:    int   # linha onde o teste está declarado
-    name:    str   # nome da função (test_xxx)
+    file:    str
+    line:    int
+    name:    str
     status:  str   # PASS / FAIL / IGNORE
-    message: str   # mensagem (geralmente em FAIL)
+    message: str
 
 
 @dataclass
@@ -92,14 +135,10 @@ class UnitySummary:
     overall_ok: bool
 
 
-# Regex: file:line:test_name:STATUS[: msg]
-# (No Linux/macOS paths não têm ':' no meio.)
 _UNITY_TEST_LINE = re.compile(
     r'^(?P<file>[^:]+):(?P<line>\d+):(?P<name>[^:]+):'
     r'(?P<status>PASS|FAIL|IGNORE)(?::\s*(?P<msg>.*))?$'
 )
-
-# Sumário Unity: "N Tests M Failures K Ignored"
 _UNITY_SUMMARY_LINE = re.compile(
     r'^(?P<total>\d+)\s+Tests?\s+'
     r'(?P<failures>\d+)\s+Failures?\s+'
@@ -107,29 +146,19 @@ _UNITY_SUMMARY_LINE = re.compile(
     re.IGNORECASE,
 )
 
-# Códigos ANSI de cor/formatação. Quando UNITY_OUTPUT_COLOR está
-# definido no build, o Unity envolve cada PASS/FAIL/IGNORE/OK em
-# escape sequences como '\x1b[32m...\x1b[0m'. Como capturamos stdout
-# via subprocess para gerar PDF, essas sequências chegam literais e
-# atrapalham o regex de linhas. Strippamos antes de parsear.
-_ANSI_ESCAPE = re.compile(r'\x1b\[[0-9;]*[A-Za-z]')
-
 
 def parse_unity_output(text: str) -> UnitySummary:
     """
-    Parsear o stdout do Unity em modo verbose (-v).
+    Parseia stdout do Unity em modo verbose (-v).
 
-    Linhas que não casam com nenhum padrão são ignoradas (mensagens
-    do tddl, prints do código sob teste, separadores '---').
+    Remove sequências ANSI antes (UNITY_OUTPUT_COLOR injeta cor que
+    quebra o regex). Linhas que não casam com nenhum padrão são
+    ignoradas (prints do código sob teste, mensagens do tddl, etc.).
 
-    Códigos ANSI (gerados quando UNITY_OUTPUT_COLOR está habilitado)
-    são removidos antes do match, de modo que cores no terminal não
-    quebram o parser.
-
-    Se a linha de sumário não for encontrada (output cortado), os
-    contadores são derivados da lista de testes.
+    Se a linha de sumário "N Tests M Failures K Ignored" não for
+    encontrada (output cortado), os contadores são derivados da
+    lista de testes parseados.
     """
-    # Primeiro removemos cores ANSI globalmente.
     text = _ANSI_ESCAPE.sub('', text)
 
     tests: list[UnityTest] = []
@@ -177,109 +206,169 @@ def parse_unity_output(text: str) -> UnitySummary:
 
 
 # ============================================================================
-#  Unity — gerador de PDF
+#  Lizard — parser
 # ============================================================================
 
-def _status_color(status: str):
-    return {'PASS': COLOR_PASS, 'FAIL': COLOR_FAIL, 'IGNORE': COLOR_IGNORE}.get(
-        status, COLOR_NEUTRAL
-    )
+@dataclass
+class LizardFunction:
+    name:   str
+    file:   str
+    start:  int
+    end:    int
+    nloc:   int
+    ccn:    int
+    length: int
+    params: int
+    tokens: int
+    violations: list[str] = field(default_factory=list)  # ['ccn'/'length'/'args']
+
+    @property
+    def has_violation(self) -> bool:
+        return bool(self.violations)
 
 
-def _make_unity_styles() -> dict[str, ParagraphStyle]:
-    base = getSampleStyleSheet()
-    return {
-        'title': ParagraphStyle(
-            'TddlTitle', parent=base['Title'],
-            fontName='Helvetica-Bold', fontSize=18,
-            textColor=COLOR_NEUTRAL, spaceAfter=2*mm, alignment=0,
-        ),
-        'subtitle': ParagraphStyle(
-            'TddlSubtitle', parent=base['Normal'],
-            fontName='Helvetica', fontSize=10,
-            textColor=COLOR_MUTED, spaceAfter=6*mm,
-        ),
-        'section': ParagraphStyle(
-            'TddlSection', parent=base['Heading2'],
-            fontName='Helvetica-Bold', fontSize=12,
-            textColor=COLOR_NEUTRAL, spaceBefore=4*mm, spaceAfter=3*mm,
-        ),
-        'mono': ParagraphStyle(
-            'TddlMono', parent=base['Normal'],
-            fontName='Courier', fontSize=8.5, textColor=COLOR_NEUTRAL,
-        ),
-        'msg': ParagraphStyle(
-            'TddlMsg', parent=base['Normal'],
-            fontName='Courier', fontSize=8,
-            textColor=COLOR_FAIL, leftIndent=2*mm,
-        ),
-    }
+@dataclass
+class LizardFileReport:
+    """Resultados do lizard num único arquivo (test_file ou src_file)."""
+    label:     str    # "test" / "src"
+    file_path: Path
+    functions: list[LizardFunction]
+
+    @property
+    def total_functions(self) -> int:
+        return len(self.functions)
+
+    @property
+    def violating_functions(self) -> int:
+        return sum(1 for f in self.functions if f.has_violation)
+
+    @property
+    def clean(self) -> bool:
+        return self.violating_functions == 0
 
 
-def _unity_metadata_table(test_file: Path, mode: str, run_dt: datetime) -> Table:
-    rows = [
-        ['Arquivo:',   str(test_file)],
-        ['Modo:',      mode],
-        ['Executado:', run_dt.strftime('%Y-%m-%d %H:%M:%S')],
-    ]
-    t = Table(rows, colWidths=[28*mm, None])
-    t.setStyle(TableStyle([
-        ('FONTNAME',  (0, 0), (0, -1), 'Helvetica-Bold'),
-        ('FONTNAME',  (1, 0), (1, -1), 'Helvetica'),
-        ('FONTSIZE',  (0, 0), (-1, -1), 9),
-        ('TEXTCOLOR', (0, 0), (0, -1), COLOR_MUTED),
-        ('TEXTCOLOR', (1, 0), (1, -1), COLOR_NEUTRAL),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 1.5*mm),
-        ('TOPPADDING',    (0, 0), (-1, -1), 0.5*mm),
-        ('LEFTPADDING',   (0, 0), (-1, -1), 0),
-    ]))
-    return t
+@dataclass
+class LizardSummary:
+    """Resultados completos do lizard nesta execução."""
+    files:     list[LizardFileReport]
+    ccn_th:    int
+    length_th: int
+    args_th:   int
+
+    @property
+    def clean(self) -> bool:
+        return all(f.clean for f in self.files)
+
+    @property
+    def total_functions(self) -> int:
+        return sum(f.total_functions for f in self.files)
+
+    @property
+    def total_violations(self) -> int:
+        return sum(f.violating_functions for f in self.files)
 
 
-def _unity_summary_cards(summary: UnitySummary) -> Table:
-    """3 cards PASS/FAIL/IGNORE com número grande + label."""
-    passed = summary.total - summary.failures - summary.ignored
+def parse_lizard_csv(
+    csv_text: str, ccn_th: int, length_th: int, args_th: int,
+) -> list[LizardFunction]:
+    """
+    Parseia output `lizard --csv`.
+
+    Colunas (zero-indexed):
+        0: NLOC, 1: CCN, 2: tokens, 3: parameter count, 4: length,
+        5: location ("name@start-end@file"), 6: file, 7: name,
+        8: long_name, 9: start_line, 10: end_line
+
+    Cada função recebe a lista de thresholds que violou, calculada
+    aqui contra os thresholds passados (não confiamos no -w do lizard
+    porque ele só filtra a saída texto).
+    """
+    functions: list[LizardFunction] = []
+    reader = csv.reader(io.StringIO(csv_text))
+    for row in reader:
+        if len(row) < 11:
+            continue
+        try:
+            nloc   = int(row[0])
+            ccn    = int(row[1])
+            tokens = int(row[2])
+            params = int(row[3])
+            length = int(row[4])
+            start  = int(row[9])
+            end    = int(row[10])
+        except ValueError:
+            continue   # cabeçalho ou linha não-numérica
+
+        fn = LizardFunction(
+            name=row[7], file=row[6],
+            start=start, end=end,
+            nloc=nloc, ccn=ccn, length=length, params=params, tokens=tokens,
+        )
+        if ccn    > ccn_th:    fn.violations.append('ccn')
+        if length > length_th: fn.violations.append('length')
+        if params > args_th:   fn.violations.append('args')
+        functions.append(fn)
+    return functions
+
+
+# ============================================================================
+#  Helpers visuais compartilhados
+# ============================================================================
+
+def _hex_for_para(color) -> str:
+    """Converte reportlab Color → '#RRGGBB' (formato do tag <font color>)."""
+    return '#' + color.hexval()[2:]
+
+
+def _three_cards(
+    values:   tuple[str, str, str],
+    labels:   tuple[str, str, str],
+    actives:  tuple[bool, bool, bool],
+    bg_top:   tuple,
+    bg_label: tuple,
+    fg_value: tuple,
+    inactive_top: object   = COLOR_BG_ROW,
+    inactive_label: object = COLOR_MUTED,
+    inactive_value: object = COLOR_MUTED,
+) -> Table:
+    """3 cards lado a lado — esqueleto reutilizável."""
     GAP = ''
     data = [
-        [str(passed), GAP, str(summary.failures), GAP, str(summary.ignored)],
-        ['PASSED',    GAP, 'FAILED',               GAP, 'IGNORED'],
+        [values[0], GAP, values[1], GAP, values[2]],
+        [labels[0], GAP, labels[1], GAP, labels[2]],
     ]
     page_width = A4[0] - 30*mm
     gap_w  = 3*mm
     card_w = (page_width - 2*gap_w) / 3.0
-    t = Table(
-        data,
-        colWidths=[card_w, gap_w, card_w, gap_w, card_w],
-        rowHeights=[18*mm, 8*mm],
-    )
+    t = Table(data,
+              colWidths=[card_w, gap_w, card_w, gap_w, card_w],
+              rowHeights=[18*mm, 8*mm])
 
-    fail_active   = summary.failures > 0
-    ignore_active = summary.ignored  > 0
+    def top(i):    return bg_top[i]   if actives[i] else inactive_top
+    def lab(i):    return bg_label[i] if actives[i] else inactive_label
+    def val(i):    return fg_value[i] if actives[i] else inactive_value
 
     style = [
-        # números grandes (linha 0)
         ('FONTNAME',  (0, 0), (-1, 0), 'Helvetica-Bold'),
         ('FONTSIZE',  (0, 0), (-1, 0), 32),
         ('ALIGN',     (0, 0), (-1, 0), 'CENTER'),
         ('VALIGN',    (0, 0), (-1, 0), 'MIDDLE'),
-        ('TEXTCOLOR', (0, 0), (0, 0), COLOR_PASS),
-        ('TEXTCOLOR', (2, 0), (2, 0), COLOR_FAIL   if fail_active   else COLOR_MUTED),
-        ('TEXTCOLOR', (4, 0), (4, 0), COLOR_IGNORE if ignore_active else COLOR_MUTED),
-        ('BACKGROUND', (0, 0), (0, 0), colors.HexColor('#eafaf1')),
-        ('BACKGROUND', (2, 0), (2, 0),
-            colors.HexColor('#fdedec') if fail_active   else COLOR_BG_ROW),
-        ('BACKGROUND', (4, 0), (4, 0),
-            colors.HexColor('#fef9e7') if ignore_active else COLOR_BG_ROW),
-        # labels (linha 1)
+        ('TEXTCOLOR', (0, 0), (0, 0), val(0)),
+        ('TEXTCOLOR', (2, 0), (2, 0), val(1)),
+        ('TEXTCOLOR', (4, 0), (4, 0), val(2)),
+        ('BACKGROUND', (0, 0), (0, 0), top(0)),
+        ('BACKGROUND', (2, 0), (2, 0), top(1)),
+        ('BACKGROUND', (4, 0), (4, 0), top(2)),
+
         ('FONTNAME',  (0, 1), (-1, 1), 'Helvetica-Bold'),
         ('FONTSIZE',  (0, 1), (-1, 1), 9),
         ('ALIGN',     (0, 1), (-1, 1), 'CENTER'),
         ('VALIGN',    (0, 1), (-1, 1), 'MIDDLE'),
         ('TEXTCOLOR', (0, 1), (-1, 1), colors.white),
-        ('BACKGROUND', (0, 1), (0, 1), COLOR_PASS),
-        ('BACKGROUND', (2, 1), (2, 1), COLOR_FAIL   if fail_active   else COLOR_MUTED),
-        ('BACKGROUND', (4, 1), (4, 1), COLOR_IGNORE if ignore_active else COLOR_MUTED),
-        # padding zerado
+        ('BACKGROUND', (0, 1), (0, 1), lab(0)),
+        ('BACKGROUND', (2, 1), (2, 1), lab(1)),
+        ('BACKGROUND', (4, 1), (4, 1), lab(2)),
+
         ('LEFTPADDING',   (0, 0), (-1, -1), 0),
         ('RIGHTPADDING',  (0, 0), (-1, -1), 0),
         ('TOPPADDING',    (0, 0), (-1, -1), 0),
@@ -289,21 +378,35 @@ def _unity_summary_cards(summary: UnitySummary) -> Table:
     return t
 
 
+# ============================================================================
+#  Seção Unity
+# ============================================================================
+
+def _status_color(status: str):
+    return {'PASS': COLOR_PASS, 'FAIL': COLOR_FAIL, 'IGNORE': COLOR_IGNORE}.get(
+        status, COLOR_NEUTRAL
+    )
+
+
+def _unity_cards(summary: UnitySummary) -> Table:
+    passed = summary.total - summary.failures - summary.ignored
+    return _three_cards(
+        values  = (str(passed), str(summary.failures), str(summary.ignored)),
+        labels  = ('PASSED', 'FAILED', 'IGNORED'),
+        actives = (True, summary.failures > 0, summary.ignored > 0),
+        bg_top   = (COLOR_PASS_BG, COLOR_FAIL_BG, COLOR_IGN_BG),
+        bg_label = (COLOR_PASS,    COLOR_FAIL,    COLOR_IGNORE),
+        fg_value = (COLOR_PASS,    COLOR_FAIL,    COLOR_IGNORE),
+    )
+
+
 def _unity_tests_table(tests: list[UnityTest], styles: dict) -> Table:
-    """Tabela detalhada: Status | Test | Line | Message."""
+    """Tabela: Status | Test | Line | Message."""
     header = ['Status', 'Test', 'Line', 'Message']
     rows: list[list] = [header]
 
-    # Estilo dedicado pro nome do teste: monospace, mesma cor neutra,
-    # e — crucial — usado dentro de um Paragraph para quebrar linhas
-    # longas em vez de transbordar pra coluna seguinte.
     name_style = ParagraphStyle(
-        'TddlTestName', parent=styles['mono'],
-        fontName='Courier', fontSize=8,
-        textColor=COLOR_NEUTRAL,
-        leading=10,                # espaço entre linhas quebradas
-        wordWrap='CJK',            # quebra mesmo em palavras sem espaço
-                                   # (necessário para nomes_assim_grandes)
+        'TestName', parent=styles['mono'], fontSize=8, leading=10, wordWrap='CJK',
     )
 
     for t in tests:
@@ -313,11 +416,9 @@ def _unity_tests_table(tests: list[UnityTest], styles: dict) -> Table:
             styles['mono'] if t.status == 'PASS' else
             ParagraphStyle(
                 'msg_inline', parent=styles['mono'],
-                textColor=_status_color(t.status),
-                wordWrap='CJK',
+                textColor=_status_color(t.status), wordWrap='CJK',
             )
         )
-        # escape para o nome (improvável conter < >, mas seguro)
         safe_name = t.name.replace('<', '&lt;').replace('>', '&gt;')
         rows.append([
             t.status,
@@ -334,14 +435,12 @@ def _unity_tests_table(tests: list[UnityTest], styles: dict) -> Table:
     table = Table(rows, colWidths=col_widths, repeatRows=1)
 
     cmds = [
-        # header
         ('BACKGROUND', (0, 0), (-1, 0), COLOR_HEADER),
         ('TEXTCOLOR',  (0, 0), (-1, 0), colors.white),
         ('FONTNAME',   (0, 0), (-1, 0), 'Helvetica-Bold'),
         ('FONTSIZE',   (0, 0), (-1, 0), 9),
         ('ALIGN',      (0, 0), (-1, 0), 'LEFT'),
         ('ALIGN',      (2, 0), (2, 0),  'RIGHT'),
-        # body
         ('FONTNAME',   (0, 1), (-1, -1), 'Helvetica'),
         ('FONTSIZE',   (0, 1), (-1, -1), 8.5),
         ('VALIGN',     (0, 1), (-1, -1), 'TOP'),
@@ -355,66 +454,251 @@ def _unity_tests_table(tests: list[UnityTest], styles: dict) -> Table:
     for i, t in enumerate(tests, start=1):
         cmds.append(('TEXTCOLOR', (0, i), (0, i), _status_color(t.status)))
         cmds.append(('FONTNAME',  (0, i), (0, i), 'Helvetica-Bold'))
-        # Nome do teste já é Paragraph com seu próprio estilo Courier;
-        # não aplicamos FONTNAME/FONTSIZE pra célula (1, i) aqui.
         if i % 2 == 0:
             cmds.append(('BACKGROUND', (0, i), (-1, i), COLOR_BG_ROW))
     table.setStyle(TableStyle(cmds))
     return table
 
 
-def generate_unity_pdf(
-    output_path: Path,
-    test_file:   Path,
-    mode:        str,
-    summary:     UnitySummary,
-    run_dt:      datetime | None = None,
-) -> None:
-    """
-    Gera o PDF de relatório de testes Unity em output_path.
-
-    output_path.parent é criado se não existir.
-    """
-    if run_dt is None:
-        run_dt = datetime.now()
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    doc = SimpleDocTemplate(
-        str(output_path),
-        pagesize=A4,
-        leftMargin=15*mm, rightMargin=15*mm,
-        topMargin=15*mm,  bottomMargin=15*mm,
-        title=f'tddl test report — {test_file.name}',
-        author='tddl',
-    )
-
-    styles = _make_unity_styles()
+def _unity_section(summary: UnitySummary, styles: dict) -> list:
     overall_label = 'OK' if summary.overall_ok else 'FAILED'
     overall_color = COLOR_PASS if summary.overall_ok else COLOR_FAIL
-    overall_hex = '#' + overall_color.hexval()[2:]
 
-    elements = [
-        Paragraph('Unity Test Report', styles['title']),
+    out: list = [
         Paragraph(
-            f'<font color="{overall_hex}"><b>{overall_label}</b></font> '
+            f'<font color="{_hex_for_para(overall_color)}"><b>{overall_label}</b></font> '
             f'— {summary.total} tests run, '
             f'{summary.failures} failed, '
             f'{summary.ignored} ignored',
-            styles['subtitle'],
+            styles['small_muted'],
         ),
-        _unity_metadata_table(test_file, mode, run_dt),
-        Spacer(1, 4*mm),
-        _unity_summary_cards(summary),
-        Spacer(1, 6*mm),
-        Paragraph('Test results', styles['section']),
+        Spacer(1, 2*mm),
+        _unity_cards(summary),
+        Spacer(1, 5*mm),
+        Paragraph('Test results', styles['subsection']),
+    ]
+    if summary.tests:
+        out.append(_unity_tests_table(summary.tests, styles))
+    else:
+        out.append(Paragraph(
+            '<i>No test results were parsed from the Unity output.</i>',
+            ParagraphStyle('e', parent=styles['mono'], textColor=COLOR_MUTED),
+        ))
+    return out
+
+
+# ============================================================================
+#  Seção Lizard
+# ============================================================================
+
+def _lizard_cards(summary: LizardSummary) -> Table:
+    has_viol = summary.total_violations > 0
+    return _three_cards(
+        values   = (str(summary.total_functions),
+                    str(summary.total_violations),
+                    str(len(summary.files))),
+        labels   = ('FUNCTIONS', 'VIOLATIONS', 'FILES'),
+        actives  = (True, has_viol, True),
+        bg_top   = (COLOR_BG_ROW, COLOR_VIOL_BG, COLOR_BG_ROW),
+        bg_label = (COLOR_NEUTRAL, COLOR_FAIL,    COLOR_NEUTRAL),
+        fg_value = (COLOR_NEUTRAL, COLOR_FAIL,    COLOR_NEUTRAL),
+    )
+
+
+def _lizard_file_table(file_report: LizardFileReport, styles: dict) -> Table:
+    """Tabela: Function | NLOC | CCN | Length | Args | Tokens | Location."""
+    header = ['Function', 'NLOC', 'CCN', 'Length', 'Args', 'Tokens', 'Location']
+    rows: list[list] = [header]
+
+    name_style = ParagraphStyle(
+        'FnName', parent=styles['mono'], fontSize=8, leading=10, wordWrap='CJK',
+    )
+    loc_style = ParagraphStyle(
+        'Loc', parent=styles['mono'], fontSize=7.5,
+        textColor=COLOR_MUTED, leading=9, wordWrap='CJK',
+    )
+
+    for fn in file_report.functions:
+        loc = f'{fn.file}:{fn.start}-{fn.end}'
+        rows.append([
+            Paragraph(fn.name, name_style),
+            str(fn.nloc), str(fn.ccn), str(fn.length),
+            str(fn.params), str(fn.tokens),
+            Paragraph(loc, loc_style),
+        ])
+
+    page_width = A4[0] - 30*mm
+    fn_w  = page_width * 0.30
+    loc_w = page_width * 0.30
+    num_w = (page_width - fn_w - loc_w) / 5.0
+    col_widths = [fn_w, num_w, num_w, num_w, num_w, num_w, loc_w]
+
+    table = Table(rows, colWidths=col_widths, repeatRows=1)
+
+    cmds = [
+        ('BACKGROUND', (0, 0), (-1, 0), COLOR_HEADER),
+        ('TEXTCOLOR',  (0, 0), (-1, 0), colors.white),
+        ('FONTNAME',   (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE',   (0, 0), (-1, 0), 9),
+        ('ALIGN',      (0, 0), (-1, 0), 'LEFT'),
+        ('ALIGN',      (1, 0), (5, -1), 'RIGHT'),
+        ('FONTNAME',   (0, 1), (-1, -1), 'Helvetica'),
+        ('FONTSIZE',   (0, 1), (-1, -1), 8.5),
+        ('VALIGN',     (0, 1), (-1, -1), 'TOP'),
+        ('LEFTPADDING',   (0, 0), (-1, -1), 3),
+        ('RIGHTPADDING',  (0, 0), (-1, -1), 3),
+        ('TOPPADDING',    (0, 0), (-1, -1), 3),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+        ('LINEBELOW', (0, 0), (-1, -1), 0.25, COLOR_MUTED),
     ]
 
-    if summary.tests:
-        elements.append(_unity_tests_table(summary.tests, styles))
-    else:
-        elements.append(Paragraph(
-            '<i>No test results were parsed from the Unity output.</i>',
-            styles['msg'],
+    for i, fn in enumerate(file_report.functions, start=1):
+        if fn.has_violation:
+            cmds.append(('BACKGROUND', (0, i), (-1, i), COLOR_VIOL_BG))
+            for viol in fn.violations:
+                col_idx = {'ccn': 2, 'length': 3, 'args': 4}[viol]
+                cmds.append(('TEXTCOLOR', (col_idx, i), (col_idx, i), COLOR_FAIL))
+                cmds.append(('FONTNAME',  (col_idx, i), (col_idx, i), 'Helvetica-Bold'))
+        elif i % 2 == 0:
+            cmds.append(('BACKGROUND', (0, i), (-1, i), COLOR_BG_ROW))
+
+    table.setStyle(TableStyle(cmds))
+    return table
+
+
+def _lizard_section(summary: LizardSummary, styles: dict) -> list:
+    overall_label = 'OK' if summary.clean else 'VIOLATIONS'
+    overall_color = COLOR_PASS if summary.clean else COLOR_FAIL
+
+    out: list = [
+        Paragraph(
+            f'<font color="{_hex_for_para(overall_color)}"><b>{overall_label}</b></font> '
+            f'— {summary.total_functions} functions, '
+            f'{summary.total_violations} violations, '
+            f'{len(summary.files)} file(s)',
+            styles['small_muted'],
+        ),
+        Paragraph(
+            f'Thresholds: CCN ≤ {summary.ccn_th}, '
+            f'length ≤ {summary.length_th}, '
+            f'args ≤ {summary.args_th}',
+            ParagraphStyle('th', parent=styles['small_muted'],
+                           textColor=COLOR_NEUTRAL, fontSize=9),
+        ),
+        Spacer(1, 2*mm),
+        _lizard_cards(summary),
+        Spacer(1, 5*mm),
+    ]
+    for fr in summary.files:
+        out.append(Paragraph(
+            f'<b>{fr.label}</b> — {fr.file_path.name}',
+            styles['subsection']
         ))
+        if fr.functions:
+            out.append(_lizard_file_table(fr, styles))
+        else:
+            out.append(Paragraph(
+                '<i>No functions analyzed in this file.</i>',
+                ParagraphStyle('e', parent=styles['mono'], textColor=COLOR_MUTED),
+            ))
+        out.append(Spacer(1, 3*mm))
+    return out
+
+
+# ============================================================================
+#  Capa (metadata global)
+# ============================================================================
+
+def _cover_metadata(
+    test_file: Path, src_file: Path | None, mode: str, run_dt: datetime,
+) -> Table:
+    rows = [['Arquivo:', str(test_file)]]
+    if src_file is not None:
+        rows.append(['Src:', str(src_file)])
+    rows.append(['Modo:',      mode])
+    rows.append(['Executado:', run_dt.strftime('%Y-%m-%d %H:%M:%S')])
+
+    t = Table(rows, colWidths=[28*mm, None])
+    t.setStyle(TableStyle([
+        ('FONTNAME',  (0, 0), (0, -1), 'Helvetica-Bold'),
+        ('FONTNAME',  (1, 0), (1, -1), 'Helvetica'),
+        ('FONTSIZE',  (0, 0), (-1, -1), 9),
+        ('TEXTCOLOR', (0, 0), (0, -1), COLOR_MUTED),
+        ('TEXTCOLOR', (1, 0), (1, -1), COLOR_NEUTRAL),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 1.5*mm),
+        ('TOPPADDING',    (0, 0), (-1, -1), 0.5*mm),
+        ('LEFTPADDING',   (0, 0), (-1, -1), 0),
+    ]))
+    return t
+
+
+def _global_status(
+    unity: UnitySummary | None,
+    lizard: LizardSummary | None,
+) -> tuple[bool, list[str]]:
+    """Decide o status global. Coerente com o exit code do tddl."""
+    failures: list[str] = []
+    if unity is not None and not unity.overall_ok:
+        failures.append('tests')
+    if lizard is not None and not lizard.clean:
+        failures.append('lizard')
+    return (not failures), failures
+
+
+# ============================================================================
+#  Entry point único
+# ============================================================================
+
+def generate_combined_pdf(
+    output_path: Path,
+    test_file:   Path,
+    src_file:    Path | None,
+    mode:        str,
+    run_dt:      datetime,
+    unity:       UnitySummary  | None = None,
+    lizard:      LizardSummary | None = None,
+) -> None:
+    """
+    Gera o PDF combinado. Cada ferramenta vira uma seção; se o summary
+    correspondente for None, a seção é omitida (sem páginas vazias).
+
+    Este é o único ponto de entrada usado pelo __main__.py.
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    doc = SimpleDocTemplate(
+        str(output_path), pagesize=A4,
+        leftMargin=15*mm, rightMargin=15*mm,
+        topMargin=15*mm,  bottomMargin=15*mm,
+        title=f'tddl report — {test_file.name}',
+        author='tddl',
+    )
+
+    styles = _make_styles()
+    ok, reasons = _global_status(unity, lizard)
+    status_label = 'OK' if ok else 'FAILED'
+    status_color = COLOR_PASS if ok else COLOR_FAIL
+
+    elements: list = [
+        Paragraph('tddl Report', styles['title']),
+        Paragraph(
+            f'<font color="{_hex_for_para(status_color)}"><b>{status_label}</b></font>'
+            + (f' — failures in: {", ".join(reasons)}' if reasons else ''),
+            styles['subtitle'],
+        ),
+        _cover_metadata(test_file, src_file, mode, run_dt),
+        Spacer(1, 6*mm),
+    ]
+
+    if unity is not None:
+        elements.append(Paragraph('Unity tests', styles['section']))
+        elements.extend(_unity_section(unity, styles))
+
+    if lizard is not None:
+        # Quebra de página antes de lizard se também tivermos unity,
+        # pra não amontoar tudo numa página só.
+        if unity is not None:
+            elements.append(PageBreak())
+        elements.append(Paragraph('Lizard complexity', styles['section']))
+        elements.extend(_lizard_section(lizard, styles))
 
     doc.build(elements)
