@@ -53,8 +53,7 @@ def main() -> None:
     unity                     = get_unity_path()
     root, test_dir, test_file = resolve_paths(filename)
     src_file = resolve_src_file(root, src_arg) if src_arg else None
-    
-    
+    ensure_structure(root)
     target     = f"tddl_{test_file.stem}"
     wrap_funcs = extract_wrap_funcs(test_file)
 
@@ -104,7 +103,13 @@ def main() -> None:
                 info("Tests FAILED — skipping gcovr.")
                 coverage_full = False
             else:
-                coverage_full = run_gcovr(root, build_dir, test_file, test_dir)
+                # Passamos src_file ao gcovr: quando presente, ele
+                # filtra a cobertura para considerar apenas o código
+                # de produção (ignora test_file e dependências).
+                coverage_full = run_gcovr(
+                    root, build_dir, test_file, test_dir,
+                    src_file=src_file,
+                )
         elif not tests_passed:
             info("Tests FAILED ")
 
