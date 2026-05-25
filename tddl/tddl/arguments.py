@@ -68,11 +68,7 @@ def _parse_int_flag(args: list[str], flag_prefix: str, use_lizard: bool, default
 
 
 def parse_args() -> tuple[str, bool, bool, bool, bool, int, int, int, str, bool | None]:
-    """
-    Retorna:
-        filename, use_filc, use_coverage, use_valgrind, use_lizard,
-        ccn, length, args_threshold, src_file
-    """
+   
     args = sys.argv[1:]
 
     if not args or args[0] in ("-h", "--help"):
@@ -163,6 +159,8 @@ def parse_args() -> tuple[str, bool, bool, bool, bool, int, int, int, str, bool 
         build_structure = True
     else:
         build_structure = False
-        
+    
+
+
     return (filename, use_filc, use_coverage, use_valgrind, use_lizard,
             ccn, length, args_, src_file, build_structure)

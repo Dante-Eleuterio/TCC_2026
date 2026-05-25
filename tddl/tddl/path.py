@@ -61,7 +61,7 @@ def resolve_paths(arg: str) -> tuple[Path, Path, Path]:
     stem          = Path(filename).stem
     test_dir      = all_tests_dir / stem
     test_file     = test_dir / filename
- 
+    
     if not all_tests_dir.is_dir():
         die(
             f"tests/ directory not found in: {root}\n"
@@ -96,9 +96,19 @@ def resolve_src_file(root: Path, src_arg: str) -> Path:
 
     return src_file
 
-
-
 def ensure_structure(root: Path) -> None:
+    dirs = {
+        "include": root / "include",
+        "src":     root / "src",
+        "tests":   root / "tests",
+    }
+    for name, path in dirs.items():
+        if not path.is_dir():
+            die(f"Required directory '{name}' does not exist.")
+    
+
+
+def create_structure(root: Path) -> None:
     dirs = {
         "include": root / "include",
         "src":     root / "src",
