@@ -102,10 +102,16 @@ def ensure_structure(root: Path) -> None:
         "src":     root / "src",
         "tests":   root / "tests",
     }
+
+    not_exists = []
+
     for name, path in dirs.items():
         if not path.is_dir():
-            die(f"Required directory '{name}' does not exist.")
-    
+            not_exists.append(name)
+
+    if len(not_exists) > 0:
+        names_list = ", ".join(not_exists)
+        die(f"Required directory/directories '{names_list}' do not exist.")
 
 
 def create_structure(root: Path) -> None:
