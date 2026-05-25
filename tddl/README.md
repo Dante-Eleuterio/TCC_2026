@@ -1,221 +1,487 @@
 # tddl
 
-A command-line tool for running Unity-based C tests with optional gcovr coverage
-and Fil-C memory-safety checks. It handles CMake configuration, builds, test
-execution, and cleanup so you can focus on writing tests.
+**TDD launcher for Unity-based C tests.**
+
+`tddl` is a single command that takes your C test file and does everything around it: builds it with CMake, runs it under [Unity](https://www.throwtheswitch.org/unity), optionally checks for memory errors with valgrind, measures code coverage with gcovr, runs static complexity analysis with lizard, compiles with the memory-safe [Fil-C](https://github.com/pizlonator/llvm-project-deluge) compiler, and bundles all results into a polished PDF report.
+
+You write tests; `tddl` handles the rest.
 
 ---
 
-## Dependencies
+## Table of contents
 
-- Python 3.10 or later
-- CMake 3.10 or later
-- gcc with `--coverage` support (for `--coverage` mode)
-- gcovr (for `--coverage` mode)
-- Fil-C (for `--filc` mode, optional)
+- [What problem does this solve?](#what-problem-does-this-solve)
+- [Quick start](#quick-start)
+- [Project layout](#project-layout)
+- [The five commands](#the-five-commands)
+  - [`tddl --build`](#tddl---build)
+  - [`tddl --build-filc`](#tddl---build-filc)
+  - [`tddl --doctor`](#tddl---doctor)
+  - [`tddl <test_file.c>`](#tddl-test_filec)
+  - [`tddl --help`](#tddl---help)
+- [Flags reference](#flags-reference)
+  - [`--src`](#--src-filec)
+  - [`--include`](#--include-files)
+  - [`--coverage`](#--coverage)
+  - [`--valgrind`](#--valgrind)
+  - [`--filc`](#--filc)
+  - [`--lizard`](#--lizard---ccnn---lengthn---argsn)
+  - [`--pdf`](#--pdf)
+- [Writing tests](#writing-tests)
+- [The PDF report](#the-pdf-report)
+- [Exit codes](#exit-codes)
+- [Where things go](#where-things-go)
+- [Environment variables](#environment-variables)
+- [Examples](#examples)
+- [Troubleshooting](#troubleshooting)
 
 ---
 
-## Installation
+## What problem does this solve?
 
+Setting up a proper test environment for a C project is tedious. You need:
 
+- A test framework (Unity)
+- A build system (CMake) generating per-test executables
+- Memory checkers (valgrind, or Fil-C if you prefer compile-time safety)
+- Coverage tools (gcovr) with HTML reports
+- Complexity metrics (lizard) with sensible thresholds
+- Glue code to wire all of that together
+- A way to share results — usually a PDF for instructors, reviewers, or yourself later
+
+Each of these is its own learning curve. `tddl` collapses them into a single workflow: install with `tddl --build`, then run `tddl test_foo.c --src foo.c --valgrind --lizard --coverage --pdf` and get a complete report.
+
+---
+
+## Quick start
+
+```bash
+# 1. From your project root (or an empty directory you want to bootstrap)
+tddl --build
+
+# 2. Verify everything is ready (optional but recommended)
+tddl --doctor
+
+# 3. Write a test in tests/test_foo/test_foo.c
+
+# 4. Run it
+tddl test_foo.c
+```
+
+If you want the full treatment — coverage, memory check, complexity, PDF — chain the flags:
+
+```bash
+tddl test_foo.c --src foo.c --valgrind --coverage --lizard --pdf
+```
+
+---
+
+## Project layout
+
+`tddl` expects this structure (and creates it for you with `--build`):
+
+```
+project/
+├── include/      Public headers (.h files) shared across tests
+├── src/          Your implementation files (.c)
+├── tests/
+│   └── test_foo/
+│       └── test_foo.c   The test file
+├── vendor/       Third-party dependencies (Unity, optionally Fil-C)
+├── reports/      Generated PDF reports (one folder per test)
+├── coverage/     Generated HTML coverage reports
+└── .gitignore    tddl adds vendor/, reports/, coverage/ here automatically
+```
+
+**Key convention**: each test file lives in its own subdirectory under `tests/`, where the subdirectory name matches the file's stem (the name without `.c`). So `tests/test_foo/test_foo.c`, not `tests/test_foo.c` directly. This is what lets `tddl` give each test isolated build artifacts and reports.
+
+---
+
+## The five commands
+
+`tddl` has five top-level modes. The first three are setup/diagnostics; the last two are how you actually use it.
+
+### `tddl --build`
+
+The bootstrap command. Run it once per project (or once per new machine — it's per-project, not global). It does everything you need to go from "fresh `git clone`" to "ready to test":
+
+1. **Detects your package manager** (apt, dnf, pacman, or brew).
+2. **Installs system tools** that need root: `cmake`, `valgrind`, `git`, a C compiler. Asks for sudo when needed.
+3. **Installs Python tools** via `pipx` (isolated venvs): `lizard`, `gcovr`. Plus `reportlab` via `pip install --user` for PDF generation.
+4. **Clones Unity** into `./vendor/unity/` (pinned to a stable release tag).
+5. **Creates the directory structure** (`include/`, `src/`, `tests/`) if missing.
+6. **Updates `.gitignore`** with a managed block that ignores `vendor/`, `reports/`, and `coverage/`. Your existing rules are preserved — the block is appended with marker comments so re-runs don't duplicate it.
+
+It's **idempotent**: re-running it is safe. Tools already installed are detected via `which` and skipped. Unity already vendored is left alone. Your existing `.gitignore` rules are never touched.
+
+What it does **not** install: Fil-C. That's a separate command because it's a 30–60 minute compile.
+
+### `tddl --build-filc`
+
+Builds Fil-C into `./vendor/filc/`. This is split from `--build` because the Fil-C build is heavy: 30–60 minutes of compile time and 10–20 GB of disk space. Only run this if you actually plan to use the `--filc` flag.
+
+Prerequisites are checked first (you need `git`, `cmake`, and `gcc` to be present — running `tddl --build` first guarantees this), so you get a clean error message up front rather than 5 minutes into a clone.
+
+### `tddl --doctor`
+
+A **read-only** health check. Inspired by `flutter doctor` and `brew doctor`. Tells you exactly what's installed, what's missing, and where dependencies resolve to. **Installs nothing.**
+
+The output looks like:
+
+```
+tddl --doctor — checking environment
+============================================================
+
+System:
+  platform: Linux 6.18.5 (x86_64)
+  ✓  package manager      apt (/usr/bin/apt-get)
+
+Build toolchain:
+  ✓  cmake                /usr/bin/cmake
+  ✓  git                  /usr/bin/git
+  ✓  gcc                  /usr/bin/gcc
+
+Testing & analysis tools:
+  ✓  valgrind             /usr/bin/valgrind
+  ✗  lizard               not found in PATH
+  ✓  gcovr                /home/user/.local/bin/gcovr
+  ✓  pipx                 /usr/bin/pipx
+
+Python libraries:
+  ✓  reportlab            v4.4.10
+
+Project dependencies (resolved against current directory):
+  project root: /home/user/myproj
+  ✓  Unity                /home/user/myproj/vendor/unity (vendored)
+  ⚠  Fil-C                not built (optional — run `tddl --build-filc` if you need --filc)
+
+Project structure:
+  ✓  include/             /home/user/myproj/include
+  ✓  src/                 /home/user/myproj/src
+  ✓  tests/               /home/user/myproj/tests
+```
+
+A few details worth knowing:
+
+- Each `OK` line shows the **exact path** where the tool was found. Useful for catching "wrong version on the PATH" issues.
+- For Unity and Fil-C, it shows the resolution source: `(vendored)` if it came from `./vendor/`, or `(via $UNITY_PATH)` if you have the env var set as an override.
+- It uses ANSI colors in a terminal (`✓` green, `✗` red, `⚠` yellow) and degrades to plain `OK`/`MISSING`/`WARN` text when redirected to a file, so `tddl --doctor > log.txt` doesn't pollute your log with escape codes.
+- **Exit code 0** if everything needed for the basic flow is there; **exit code 1** otherwise. This makes it usable in CI: `tddl --doctor && tddl test_foo.c`.
+
+Run `--doctor` after `--build` to confirm everything went well, or whenever you suspect something's wrong with your environment.
+
+### `tddl <test_file.c>`
+
+The main command — runs a test. Combine it with any of the flags below.
+
+The test file is looked up at `./tests/<stem>/<test_file.c>`, where `<stem>` is the filename without the `.c` extension. So `tddl test_list.c` looks for `./tests/test_list/test_list.c`.
+
+Without any flags, it just builds and runs your Unity tests, printing each `PASS`/`FAIL`/`IGNORE` result to the terminal.
+
+### `tddl --help`
+
+Prints a structured usage guide. Same content as this README in compressed form. Try it with `tddl -h` or `tddl --help` from anywhere.
+
+---
+
+## Flags reference
+
+All flags below apply to `tddl <test_file.c>`. They can (usually) be combined.
+
+### `--src <file.c>`
+
+Links an extra source file from `src/` into the test build. **You almost always need this** — your test file calls functions, and those functions are defined in `src/foo.c`, so the test build needs to link them in.
+
+```bash
+tddl test_list.c --src list.c
+```
+
+Pass only the basename — `--src list.c`, not `--src src/list.c`. The path is always relative to `./src/`.
+
+When combined with `--coverage`, this also tells `tddl` to **filter coverage to this file only**, so test code itself doesn't count toward coverage numbers (which is what you want — 100% coverage of the test file is meaningless).
+
+### `--include <files>`
+
+Comma-separated list of additional files from `include/` to link into the build. Useful for shared helpers, mocks, or test fixtures.
+
+```bash
+tddl test_list.c --src list.c --include mocks.c,helpers.c
+```
+
+The list is comma-separated with no spaces around the commas. Each file is looked up under `./include/`.
+
+`tddl` also automatically scans the test file, `--src` file, and `--include` files for `__wrap_<funcname>` definitions. Any found are passed to the linker as `-Wl,--wrap=<funcname>`, so [function mocking with linker wrapping](https://sourceware.org/binutils/docs/ld/Options.html) works out of the box. Define `__wrap_malloc` somewhere and your test will call your wrapper instead of libc's `malloc`.
+
+### `--coverage`
+
+Runs `gcovr` after the tests pass. Reports line coverage to the terminal and writes:
+
+- A line-by-line **HTML report** to `coverage/<stem>/index.html` — open it in a browser to see which lines were and weren't hit, color-coded.
+- A `summary.json` with machine-readable numbers next to it.
+
+**Coverage below 100% causes `tddl` to exit non-zero.** This is intentional — coverage is a gate, not a metric. If you don't want strict 100%, don't use `--coverage`; use `gcovr` directly instead.
+
+When combined with `--src`, coverage is filtered to that source file only. Without `--src`, coverage covers everything in the build directory (including the test file, which you typically don't want).
+
+Cannot be combined with `--filc`.
+
+### `--valgrind`
+
+Runs the test binary under valgrind with **strict** memory checks:
+
+```
+--leak-check=full
+--show-leak-kinds=all
+--track-origins=yes
+--error-exitcode=1
+```
+
+`--error-exitcode=1` is the important one: it makes valgrind itself exit non-zero on any memory error, even if your Unity tests technically passed. So a test that leaks 8 bytes but doesn't `TEST_ASSERT_FAIL` will still fail the build.
+
+**Cannot be combined with `--filc`.** Fil-C does memory safety at compile time; running its instrumented binary under valgrind produces false positives on Fil-C's runtime metadata.
+
+When combined with `--pdf`, the full valgrind output is parsed and rendered into the PDF report (see [The PDF report](#the-pdf-report) for what that looks like).
+
+### `--filc`
+
+Compiles the test with [Fil-C](https://github.com/pizlonator/llvm-project-deluge), a memory-safe C compiler. Where valgrind catches memory bugs **at runtime** by instrumenting allocations, Fil-C catches them **at compile time and during execution** through a much stronger model (bounded pointers, no use-after-free, no buffer overflows). It's slower but catches bugs valgrind can't.
+
+Requires Fil-C to be built first: `tddl --build-filc`.
+
+Resolved from `$FIL_C_PATH` if set, otherwise from `./vendor/filc/build/bin/clang`.
+
+**Cannot be combined with `--valgrind` or `--coverage`.** Fil-C's instrumentation interferes with both.
+
+### `--lizard [--ccn=N] [--length=N] [--args=N]`
+
+Runs [lizard](https://github.com/terryyin/lizard) static complexity analysis on the test file (and on the `--src` file, if passed). Any function exceeding the thresholds causes `tddl` to exit non-zero.
+
+**Default thresholds:**
+
+| Metric | Default | Meaning |
+|---|---|---|
+| `--ccn=N` | 10 | Maximum cyclomatic complexity per function (number of distinct paths) |
+| `--length=N` | 50 | Maximum lines of code per function |
+| `--args=N` | 5 | Maximum parameter count per function |
+
+Override individually:
+
+```bash
+tddl test_foo.c --src foo.c --lizard --ccn=15 --length=80
+```
+
+Threshold flags only work alongside `--lizard` — using `--ccn=20` without `--lizard` is an error (because it would silently have no effect, which is worse than failing).
+
+Can be combined with any other flag.
+
+### `--pdf`
+
+Generates a combined PDF report at `reports/<stem>/report.pdf`. The report includes whichever sections actually ran: Unity test results, valgrind diagnostics, lizard complexity findings. Sections for tools you didn't enable are simply omitted (no empty pages).
+
+When `--pdf` is set, the terminal output is **condensed** to a short summary plus the path to the PDF. The full output is captured into the report. This keeps your terminal clean during long runs and gives you a permanent artifact afterward.
+
+See [The PDF report](#the-pdf-report) below for what each section contains.
+
+---
+
+## Writing tests
+
+`tddl` uses [Unity](https://www.throwtheswitch.org/unity), a small testing framework for C. A minimal test file looks like this:
+
+```c
+#ifdef TEST
+
+#include "unity.h"
+#include "list.h"   // header for src/list.c
+
+void setUp(void)    {}   // called before each test
+void tearDown(void) {}   // called after each test
+
+void test_list_new_returns_empty(void) {
+    list_t *l = list_new();
+    TEST_ASSERT_NOT_NULL(l);
+    TEST_ASSERT_EQUAL_INT(0, list_length(l));
+    list_free(l);
+}
+
+void test_list_append_increments_length(void) {
+    list_t *l = list_new();
+    list_append(l, 42);
+    TEST_ASSERT_EQUAL_INT(1, list_length(l));
+    list_free(l);
+}
+
+int main(void) {
+    UNITY_BEGIN();
+    RUN_TEST(test_list_new_returns_empty);
+    RUN_TEST(test_list_append_increments_length);
+    return UNITY_END();
+}
+
+#endif
+```
+
+A few conventions worth noting:
+
+- **Wrap everything in `#ifdef TEST`**. `tddl` defines `TEST` when building, so this code only compiles in test builds. Your production builds (if you have any) ignore it entirely.
+- **`setUp` and `tearDown`** are called by Unity before and after each `RUN_TEST` — use them for fixtures.
+- **Use the `TEST_ASSERT_*` macros** from Unity. There are dozens — see [Unity's documentation](http://www.throwtheswitch.org/unity) for the full list.
+- **Each `RUN_TEST` call adds a test to the suite**. You're explicit about which tests run; nothing is auto-discovered.
+
+---
+
+## The PDF report
+
+When `--pdf` is enabled, you get a single-document report with these sections (in order):
+
+**Cover page** — Status banner (green OK / red FAILED), test file path, src file path, the mode string (`gcc + valgrind + lizard + pdf`), and timestamp.
+
+**Unity tests** — Three summary cards (passed / failed / ignored), then a row-per-test table with status, name, line number, and message. Failures and ignores are highlighted in red and yellow respectively.
+
+**Valgrind memory check** *(only if `--valgrind` was used)* — Three summary cards (total errors / definitely lost bytes / indirect+possible bytes), a **heap usage** row showing `allocs / frees / bytes allocated / in use at exit` (the last cell goes green if everything was freed, red otherwise), the **leak summary** table with all 5 categories (definitely / indirectly / possibly lost / still reachable / suppressed), and finally a list of every error/leak with its full stack trace, each in its own card with a colored left border indicating severity.
+
+**Lizard complexity** *(only if `--lizard` was used)* — Three summary cards (functions analyzed / violations / files), the thresholds used, and a per-file table listing every function with its NLOC, CCN, length, arg count, token count, and source location. Functions that violate any threshold are highlighted in red with the offending column bolded.
+
+The report uses a consistent visual language across all sections: same color palette (green for pass, red for fail, yellow for warning, blue for informational), same card layout, same table style. Each section can stand alone but they share design.
+
+---
+
+## Exit codes
+
+`tddl` returns:
+
+- **`0`** if everything succeeded: all tests passed, coverage was 100% (if `--coverage` was used), no memory errors (if `--valgrind` was used), no complexity violations (if `--lizard` was used).
+- **`1`** if any of the above failed.
+
+This makes `tddl` directly usable in CI pipelines, pre-commit hooks, or shell `&&` chains. There's no "passed with warnings" middle ground — anything you opted into has to pass.
+
+For setup/diagnostic commands:
+
+- `tddl --build` exits 0 on success, 1 if installation failed.
+- `tddl --build-filc` same.
+- `tddl --doctor` exits 0 if the environment is fully ready, 1 if anything important is missing. Fil-C missing is **not** a failure (it's optional).
+
+---
+
+## Where things go
+
+| Path | What's there | Tracked in git? |
+|---|---|---|
+| `include/` | Your public headers | Yes |
+| `src/` | Your implementation `.c` files | Yes |
+| `tests/<stem>/<stem>.c` | Your test files | Yes |
+| `vendor/unity/` | Vendored Unity (cloned by `--build`) | No (gitignored) |
+| `vendor/filc/` | Vendored Fil-C (built by `--build-filc`) | No (gitignored) |
+| `reports/<stem>/report.pdf` | PDF reports (one per test) | No (gitignored) |
+| `coverage/<stem>/index.html` | HTML coverage reports | No (gitignored) |
+| `coverage/<stem>/summary.json` | Machine-readable coverage summary | No (gitignored) |
+
+CMake build directories are temporary (created under `/tmp/tddl_build_*`) and removed automatically after each run. You don't need to worry about them or clean anything up.
 
 ---
 
 ## Environment variables
 
-tddl requires the following environment variables. Add them to your `~/.bashrc` and run `source ~/.bashrc` after.
+`tddl` works without any environment variables after `tddl --build` — that's the point. The two variables below exist as **escape hatches** for when you want to override the defaults:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `UNITY_PATH` | `./vendor/unity/` | Path to a Unity checkout if you have one installed elsewhere |
+| `FIL_C_PATH` | `./vendor/filc/build/bin/clang` | Path to the Fil-C clang binary |
+
+When set, these **take precedence** over the vendored versions. Useful if you have one global Unity install shared across many projects and don't want a copy per repo. To go back to the vendored version, just `unset UNITY_PATH`.
+
+If a variable is set but points to an invalid path, `tddl` errors immediately — it never silently falls back to the vendored version when an explicit override is set wrong.
+
+---
+
+## Examples
+
+**First-time project setup:**
 
 ```bash
-git clone https://github.com/ThrowTheSwitch/Unity.git
-cd Unity
-git pull
+mkdir my-c-project && cd my-c-project
+tddl --build
+tddl --doctor    # verify everything is green
 ```
 
-```bash
-# Required — path to the Unity root directory
-export UNITY_PATH="/path/to/Unity"
+**Basic test run:**
 
-# Required only for --filc mode
-export FIL_C_PATH="/path/to/filc/build/bin/clang"
+```bash
+tddl test_list.c
+```
+
+**Test against an implementation in `src/`:**
+
+```bash
+tddl test_list.c --src list.c
+```
+
+**Test with helpers from `include/`:**
+
+```bash
+tddl test_list.c --src list.c --include mocks.c,fixtures.c
+```
+
+**Strict CI-style run: coverage + memory check + complexity, fail on anything:**
+
+```bash
+tddl test_list.c --src list.c --coverage --valgrind --lizard
+```
+
+**Full deliverable: same as above, but with a PDF report to share:**
+
+```bash
+tddl test_list.c --src list.c --coverage --valgrind --lizard --pdf
+# → reports/test_list/report.pdf
+```
+
+**Loose complexity thresholds for legacy code:**
+
+```bash
+tddl test_legacy.c --src legacy.c --lizard --ccn=20 --length=100 --args=8
+```
+
+**Memory-safe compilation instead of valgrind:**
+
+```bash
+tddl --build-filc    # one-time, takes 30-60 min
+tddl test_list.c --src list.c --filc
 ```
 
 ---
 
-## Project structure
+## Troubleshooting
 
-tddl expects the following layout. Run all commands from the project root.
+**"Required tool not found in PATH: cmake (always required to build tests)"**
+Run `tddl --build`. If it ran but cmake is still missing, run `tddl --doctor` to see what failed.
 
-```
-project/
-├── include/                  <- public headers (.h)
-├── src/                      <- source files (.c)
-└── tests/
-    └── build_name/
-        ├── build_name.c   <- test file (user-created)
-        └── CMakeLists.txt    <- regenerated by tddl on every run 
-```
+**"Unity not found"**
+Run `tddl --build`. If you have Unity installed somewhere else, `export UNITY_PATH=/path/to/Unity` instead.
 
-The test file can be structured in two ways:
+**"Test subdirectory not found: tests/test_foo"**
+Each test file lives in its own subdirectory. Run `mkdir -p tests/test_foo && touch tests/test_foo/test_foo.c` and write your test inside `#ifdef TEST`.
 
-**Structure A — self-contained:** the source code and tests live in the same
-file, separated by `#ifdef TEST`. No `--src` flag needed.
+**"--src file not found"**
+Make sure you pass only the basename: `--src list.c`, not `--src src/list.c`. The path is always relative to `./src/`.
 
-```c
-void build_name(char *name, char *dir, char *file)
-{
-    strncpy(name, dir, strlen(dir)+1);
-    strcat(name, "/");
-    strcat(name, file);
-}
+**Coverage shows 0% even though tests are passing**
+You probably forgot `--src`. Without it, `tddl` doesn't know which file to measure coverage against.
 
-#ifdef TEST
-#include "unity.h"
+**"--filc and --valgrind cannot be used together"**
+This is by design. Fil-C does memory safety at compile time; running its binaries under valgrind produces false positives. Pick one approach per run.
 
-void setUp(void) {}
-void tearDown(void) {}
+**Tests pass but `tddl` exits non-zero with `--coverage`**
+Coverage is gated at 100%. If you don't want that, drop the flag.
 
-void test_BuildName(void) { ... }
+**`tddl --build-filc` says it'll take 30-60 minutes**
+It will. Fil-C is a full LLVM build. Run it in the background and go for a walk.
 
-int main(void)
-{
-    UNITY_BEGIN();
-    RUN_TEST(test_BuildName);
-    return UNITY_END();
-}
-#endif
-```
-
-**Structure B — separate source:** the source lives in `src/` and the test file
-contains only tests. Pass the source file with `--src`.
-
-```c
-// tests/build_name/build_name.c
-#include "unity.h"
-#include "build_name.h"
-
-void setUp(void) {}
-void tearDown(void) {}
-
-void test_BuildName(void) { ... }
-
-int main(void)
-{
-    UNITY_BEGIN();
-    RUN_TEST(test_BuildName);
-    return UNITY_END();
-}
-```
-
----
-
-## Usage
-
-All commands are run from the project root.
-
-### Help
-
-```bash
-tddl -h
-```
-or
-
-```bash
-tddl -help
-```
-
-
-### Basic test run
-
-```bash
-tddl build_name.c
-```
-
-Looks for the test file at `tests/build_name/build_name.c`, generates a
-`CMakeLists.txt` if one does not exist, builds, and runs the tests.
-
-### Linking a separate source file
-
-```bash
-tddl build_name.c --src fotomosaico.c
-```
-
-Links `src/fotomosaico.c` into the test build as a separate translation unit.
-Use this with Structure B test files.
-
-### Coverage
-
-```bash
-tddl build_name.c --coverage 
-or
-tddl build_name.c --src fotomosaico.c --coverage
-```
-
-Compiles with `--coverage`, runs the tests, then runs gcovr. Produces a
-terminal summary and an HTML report at `coverage/build_name/index.html`.
-Coverage is reported against the source file when `--src` is used, and against
-the test file otherwise.
-
-### Mocking with --wrap
-
-```bash
-tddl build_name.c --src fotomosaico.c --wrap test_name
-tddl build_name.c --src fotomosaico.c --wrap test_name mock_function1 mock_function2 ...
-```
-
-Injects `-Wl,--wrap=<func>` into the linker flags for each function listed.
-This lets you define `__wrap_test_name` in your test file and have the linker
-redirect all calls to `test_name` there, without modifying the source.
-
-In your test file:
-
-```c
-// intercepts all calls to test_name when linked with --wrap test_name
-void __wrap_teste_name(char *nome)
-{
-    // your mock implementation
-}
-```
-
-### Memory-safety with Fil-C
-
-```bash
-tddl build_name.c --filc
-```
-
-Compiles using the Fil-C compiler instead of gcc. All memory safety violations
-are caught as Fil-C panics at runtime instead of producing undefined behavior.
-Coverage is not available in this mode.
-
-Requires `FIL_C_PATH` to be set. See the environment variables section above.
-
----
-
-## CMakeLists.txt
-
-tddl generates a `CMakeLists.txt` inside the test directory on every run.
-It is deleted and regenerated on every subsequent run to reflect any changes to
-flags or source files passed on the command line.
-
-The generated file is standalone — it does not depend on a root `CMakeLists.txt`.
-
----
-
-## Coverage report
-
-When run with `--coverage`, tddl creates a `coverage/` directory at the project
-root. Each test gets its own subdirectory:
-
-```
-coverage/
-└── build_name/
-    └── index.html
-```
-
-Open `index.html` in a browser to see line-by-line coverage.
+**Environment was working yesterday, now something's missing**
+Run `tddl --doctor` first. It'll tell you exactly what's broken in under a second.
 
 ---
 
 ## License
 
-BSD 2-Clause. See LICENSE for details.
+BSD 2-Clause License. See source headers for the full text.

@@ -67,70 +67,142 @@ def _parse_int_flag(args: list[str], flag_prefix: str, use_lizard: bool, default
     return value
 
 
-def parse_args() -> tuple[str, bool, bool, bool, bool, int, int, int, str, bool, list[str], bool]:
+def parse_args() -> tuple[str, bool, bool, bool, bool, int, int, int, str, bool, list[str], bool, bool, bool]:
    
     args = sys.argv[1:]
 
     if not args or args[0] in ("-h", "--help"):
-        print("USAGE GUIDE FOR TDDL \n")
-
-        print("Build: $tddl build")
         print(
-            "  -Run from the project root to generate expected structure.\n"
-            "  -It will not override any existing include/ , src/ or tests/ folders \n"
-            "  Built structure:\n"
-            "    project/        <- run tddl from here\n"
-            "    ├── include/    <- public headers (.h)\n"
-            "    ├── src/        <- reserved for future use\n"
-            "    └── tests/      <- where your test_file.c go\n"
+            "tddl — TDD launcher for Unity-based C tests.\n"
+            "       Runs your tests, optionally under valgrind, with gcovr coverage,\n"
+            "       lizard complexity analysis, Fil-C memory safety, and a combined\n"
+            "       PDF report.\n"
         )
-        print("Usage: $tddl <test_file.c> ")
-        print("  -Run from the project root. tddl looks for the file in <cwd>/tests/")
-        print("  -UNITY_PATH must be set in your environment.")
+
+        print("SETUP")
+        print("─" * 60)
+        print()
+        print("  tddl --build")
         print(
-            "  Expected structure:\n"
-            "    project/        <- run tddl from here\n"
-            "    ├── include/    <- public headers (.h)\n"
-            "    ├── src/        <- reserved for future use\n"
-            "    └── tests/\n"
-            "        └── test01.c\n"
+            "      Bootstrap the project. Idempotent — safe to re-run.\n"
+            "        • Installs cmake, valgrind, git and a C compiler via your\n"
+            "          system package manager (apt / dnf / pacman / brew).\n"
+            "        • Installs lizard and gcovr via pipx; reportlab via pip.\n"
+            "        • Clones Unity into ./vendor/unity/.\n"
+            "        • Creates include/, src/, tests/ if they don't exist.\n"
+            "        • Adds vendor/, reports/, coverage/ to .gitignore.\n"
+            "      Resulting layout:\n"
+            "        project/        <- run tddl from here\n"
+            "        ├── include/    <- public headers (.h)\n"
+            "        ├── src/        <- implementation (.c)\n"
+            "        ├── tests/      <- your test files (.c)\n"
+            "        └── vendor/     <- Unity and (optionally) Fil-C\n"
         )
-        print("Usage: $tddl <test_file.c> --src <source_file.c>")
-        print("  -Links a separate source file from src/ into the test build\n")
-
-        print("Usage: $tddl <test_file.c> --coverage")
-        print("  -Runs all tests and then uses gcovr for coverage tests \n")
-
-        print("Usage: $tddl <test_file.c> --filc")
-        print("  -Compiles test with filc and then runs all tests \n")
-
-        print("Usage: $tddl <test_file.c> --valgrind")
-        print("  -Runs tests under valgrind with strict memory checks\n")
-        print("  -CANNOT be combined with --filc\n")
-
-        print("Usage: $tddl <test_file.c> --lizard [--ccn=N] [--length=N] [--args=N]")
-        print("  -Runs lizard static analysis on the test file (and --src file, if passed)\n")
+        print("  tddl --build-filc")
         print(
-            f"  -Default thresholds: "
-            f"CCN <= {DEFAULT_LIZARD_CCN}, "
-            f"length <= {DEFAULT_LIZARD_LENGTH}, "
-            f"args <= {DEFAULT_LIZARD_ARGS}\n"
+            "      Build Fil-C into ./vendor/filc/. Takes 30–60 minutes and\n"
+            "      uses ~10–20 GB of disk. Only needed for --filc.\n"
+            "      Run `tddl --build` first to install prerequisites.\n"
         )
-        print("  -Override thresholds individually:\n"
-              "      --ccn=N      max cyclomatic complexity per function\n"
-              "      --length=N   max lines per function\n"
-              "      --args=N     max parameters per function\n")
-        print("  -If any function exceeds the thresholds, tddl exits with code != 0\n")
-        print("  -Can be combined with any other flag\n")
-        print("  -Requires lizard installed: pip install lizard")
 
-        print("Usage: $tddl <test_file.c> --pdf")
-        print("  -Generates a PDF report for the Unity test results.")
-        print("  -When --pdf is set, the terminal shows only a short summary")
-        print("   plus the path to the PDF; full output is captured into the PDF.")
-        print("  -PDF is written to: <project>/reports/<test_stem>/tests.pdf")
-        print("  -Can be combined with any other flag.")
-        print("  -Requires reportlab installed: pip install reportlab")
+        print("DIAGNOSTICS")
+        print("─" * 60)
+        print()
+        print("  tddl --doctor")
+        print(
+            "      Read-only health check. Lists every required tool and\n"
+            "      reports where Unity/Fil-C resolve to. Installs nothing.\n"
+            "      Exit code 0 if everything is ready, 1 otherwise.\n"
+        )
+
+        print("RUNNING TESTS")
+        print("─" * 60)
+        print()
+        print("  tddl <test_file.c> [flags...]")
+        print(
+            "      Compiles and runs the test file. Looked up at:\n"
+            "        ./tests/<stem>/<test_file.c>\n"
+            "      where <stem> is <test_file.c> without the .c extension.\n"
+            "\n"
+            "      Unity is resolved in this order:\n"
+            "        1. $UNITY_PATH (if set) — escape hatch for shared installs.\n"
+            "        2. ./vendor/unity/  — populated by `tddl --build`.\n"
+        )
+
+        print("  Flags:")
+        print()
+        print("    --src <file.c>")
+        print(
+            "        Link an extra source file from src/ into the test build.\n"
+            "        Required when the test exercises code that lives in src/.\n"
+        )
+        print("    --include <files>")
+        print(
+            "        Comma-separated list of header/source files from include/\n"
+            "        to add to the build. e.g. --include mocks.c,helpers.c\n"
+        )
+        print("    --coverage")
+        print(
+            "        Run gcovr after the tests. Reports line coverage and\n"
+            "        writes an HTML report to coverage/<stem>/index.html.\n"
+            "        When combined with --src, coverage is filtered to that\n"
+            "        file only (tests themselves are ignored).\n"
+            "        Coverage below 100% causes tddl to exit non-zero.\n"
+        )
+        print("    --valgrind")
+        print(
+            "        Run the test binary under valgrind with strict memory\n"
+            "        checks (--leak-check=full --show-leak-kinds=all\n"
+            "        --track-origins=yes --error-exitcode=1).\n"
+            "        Cannot be combined with --filc.\n"
+        )
+        print("    --filc")
+        print(
+            "        Compile with Fil-C, a memory-safe C compiler. Resolved\n"
+            "        from $FIL_C_PATH or ./vendor/filc/build/bin/clang.\n"
+            "        Build Fil-C first with `tddl --build-filc`.\n"
+            "        Cannot be combined with --valgrind or --coverage.\n"
+        )
+        print("    --lizard [--ccn=N] [--length=N] [--args=N]")
+        print(
+            "        Run lizard static analysis on the test file (and on the\n"
+            "        --src file, if passed). Any violation causes tddl to\n"
+            "        exit non-zero.\n"
+            f"        Default thresholds: CCN ≤ {DEFAULT_LIZARD_CCN}, "
+            f"length ≤ {DEFAULT_LIZARD_LENGTH}, args ≤ {DEFAULT_LIZARD_ARGS}.\n"
+            "        Override individually:\n"
+            "            --ccn=N      max cyclomatic complexity per function\n"
+            "            --length=N   max lines per function\n"
+            "            --args=N     max parameters per function\n"
+        )
+        print("    --pdf")
+        print(
+            "        Generate a combined PDF report containing the Unity\n"
+            "        test results, valgrind diagnostics, and lizard findings\n"
+            "        (whichever of those ran). The terminal shows a short\n"
+            "        summary; full output is captured into the PDF.\n"
+            "        Written to: reports/<stem>/report.pdf\n"
+        )
+
+        print("EXAMPLES")
+        print("─" * 60)
+        print()
+        print(
+            "  # First-time setup\n"
+            "  tddl --build\n"
+            "\n"
+            "  # Verify the environment is ready\n"
+            "  tddl --doctor\n"
+            "\n"
+            "  # Basic test run\n"
+            "  tddl test_list.c\n"
+            "\n"
+            "  # Test against the implementation in src/list.c, with coverage\n"
+            "  tddl test_list.c --src list.c --coverage\n"
+            "\n"
+            "  # Full report: tests under valgrind, complexity check, PDF output\n"
+            "  tddl test_list.c --src list.c --valgrind --lizard --pdf\n"
+        )
         sys.exit(0)
        
     filename     = args[0]
@@ -164,18 +236,24 @@ def parse_args() -> tuple[str, bool, bool, bool, bool, int, int, int, str, bool,
             die("--src requires a filename argument. e.g. --src constroi_nome.c")
         src_file = args[src_index + 1]
 
-    if args[0] in ["--build"]:
-        build_structure = True
-    else:
-        build_structure = False
-    
+    # `tddl --build`, `tddl --build-filc` e `tddl --doctor` são modos de
+    # setup/diagnóstico, mutuamente exclusivos com qualquer execução de
+    # teste. Checados em __main__.py.
+    build_structure = args[0] == "--build"
+    build_filc      = args[0] == "--build-filc"
+    run_doctor_flag = args[0] == "--doctor"
+
     include_files = []
 
     if "--include" in args:
         idx = args.index("--include")
 
         if idx + 1 >= len(args):
-            raise ValueError("--include requires a files lists separeted by comma. Example: --include mocks.c, helpers.c")
+            die(
+                "--include requires a comma-separated list of filenames.\n"
+                "  e.g. --include mocks.c,helpers.c\n"
+                "  Files are looked up under include/."
+            )
 
         include_arg = args[idx + 1]
 
@@ -186,4 +264,5 @@ def parse_args() -> tuple[str, bool, bool, bool, bool, int, int, int, str, bool,
                 include_files.append(f.strip())
 
     return (filename, use_filc, use_coverage, use_valgrind, use_lizard,
-            ccn, length, args_, src_file, build_structure, include_files, use_pdf)
+            ccn, length, args_, src_file, build_structure, include_files,
+            use_pdf, build_filc, run_doctor_flag)

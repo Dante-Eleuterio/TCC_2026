@@ -65,20 +65,23 @@ def resolve_paths(arg: str) -> tuple[Path, Path, Path]:
     if not all_tests_dir.is_dir():
         die(
             f"tests/ directory not found in: {root}\n"
-            f"  Make sure you are running tddl from the project root."
+            f"  Make sure you are running tddl from the project root.\n"
+            f"  If this is a fresh project, run `tddl --build` to bootstrap it."
         )
  
     if not test_dir.is_dir():
         die(
             f"Test subdirectory not found: {test_dir}\n"
             f"  Expected layout: tests/{stem}/{filename}\n"
-            f"  Create the subdirectory and place the .c file inside it."
+            f"  Create the directory and place the test file inside it:\n"
+            f"      mkdir -p tests/{stem} && touch tests/{stem}/{filename}"
         )
  
     if not test_file.exists():
         die(
             f"Test file not found: {test_file}\n"
-            f"  Please create it manually with your Unity tests inside #ifdef TEST."
+            f"  The directory exists but the .c file inside it doesn't.\n"
+            f"  Create it and write your Unity tests inside #ifdef TEST."
         )
  
     return root, test_dir, test_file
@@ -90,8 +93,10 @@ def resolve_src_file(root: Path, src_arg: str) -> Path:
 
     if not src_file.exists():
         die(
-            f"Source file not found: {src_file}\n"
-            f"  Make sure the file exists in <project>/src/"
+            f"--src file not found: {src_file}\n"
+            f"  Looked under {root / 'src'}. Make sure the file exists there\n"
+            f"  and you passed only the basename (e.g. --src list.c, not\n"
+            f"  --src src/list.c)."
         )
 
     return src_file
@@ -111,7 +116,11 @@ def ensure_structure(root: Path) -> None:
 
     if len(not_exists) > 0:
         names_list = ", ".join(not_exists)
-        die(f"Required directory/directories '{names_list}' do not exist.")
+        die(
+            f"Required project directory/directories missing: {names_list}.\n"
+            f"  Run `tddl --build` from the project root to create them,\n"
+            f"  or `mkdir {names_list}` if you only need the folders."
+        )
 
 
 def create_structure(root: Path) -> None:
@@ -173,6 +182,10 @@ def find_includes(root: Path, raw_list: list[str]) -> list[str]:
 
     if missing_files:
         names_list = ", ".join(missing_files)
-        die(f"Included files '{names_list}' do not exist.")
+        die(
+            f"--include file(s) not found in {include_dir}/: {names_list}\n"
+            f"  Make sure the names match files that actually exist under\n"
+            f"  include/, and that you passed only basenames (no path)."
+        )
 
     return include_paths

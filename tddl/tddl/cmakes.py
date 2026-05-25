@@ -172,7 +172,15 @@ def cmake_configure(tests_dir: Path, build_dir: Path) -> None:
     if result.returncode != 0:
         print(result.stdout)
         print(result.stderr, file=sys.stderr)
-        die("CMake configuration failed.")
+        die(
+            "CMake configuration failed — see the output above for the\n"
+            "  exact error. Common causes:\n"
+            "    • A header you #include doesn't exist in include/ or\n"
+            "      isn't passed via --include.\n"
+            "    • Unity not found (run `tddl --doctor` to diagnose).\n"
+            "    • cmake itself missing or too old (`tddl --build` installs\n"
+            "      a recent enough version)."
+        )
 
 
 def cmake_build(build_dir: Path, target: str) -> None:
@@ -184,4 +192,8 @@ def cmake_build(build_dir: Path, target: str) -> None:
     if result.returncode != 0:
         print(result.stdout)
         print(result.stderr, file=sys.stderr)
-        die("Build failed.")
+        die(
+            "Build failed — see compiler output above for the exact error.\n"
+            "  This is almost always a problem in your code (missing symbol,\n"
+            "  type mismatch, undefined reference) rather than in tddl itself."
+        )

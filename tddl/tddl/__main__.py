@@ -41,17 +41,31 @@ from .run import *
 def main() -> None:
     (filename, use_filc, use_coverage, use_valgrind, use_lizard,
      ccn, length, args_threshold, src_arg, build_structure, include_raw_list,
-     use_pdf) = parse_args()
-
-    check_tools(use_coverage, use_valgrind, use_lizard, use_pdf)
-    filc = get_filc_path() if use_filc else None
+     use_pdf, build_filc, run_doctor_flag) = parse_args()
 
     root = get_root()
+
+    # Modos de setup/diagnóstico. Cada um sai antes de qualquer checagem
+    # de teste/tools, porque o objetivo deles é exatamente preparar ou
+    # inspecionar o ambiente.
+    if run_doctor_flag:
+        from .installer import run_doctor
+        sys.exit(run_doctor(root))
+
     if build_structure:
-        create_structure(root)
+        from .installer import run_build
+        run_build(root)
         sys.exit(0)
 
-    unity                     = get_unity_path()
+    if build_filc:
+        from .installer import run_build_filc
+        run_build_filc(root)
+        sys.exit(0)
+
+    check_tools(use_coverage, use_valgrind, use_lizard, use_pdf)
+    filc = get_filc_path(root) if use_filc else None
+
+    unity                     = get_unity_path(root)
 
     ensure_structure(root)
     root, test_dir, test_file = resolve_paths(filename)
