@@ -107,8 +107,9 @@ def main() -> None:
     # (genérico — não "tests.pdf" porque o relatório agora cobre todas
     # as ferramentas, não só os testes Unity)
     report_pdf_path: Path | None = None
-    unity_pdf_list:  list = []
-    lizard_pdf_list: list = []
+    unity_pdf_list:    list = []
+    lizard_pdf_list:   list = []
+    valgrind_pdf_list: list = []
     run_dt = datetime.now()   # timestamp consistente entre logs e PDF
 
     if use_pdf:
@@ -126,6 +127,7 @@ def main() -> None:
             tests_passed = run_tests_valgrind(
                 build_dir, target,
                 pdf_collect=(unity_pdf_list if use_pdf else None),
+                pdf_collect_valgrind=(valgrind_pdf_list if use_pdf else None),
             )
         else:
             tests_passed = run_tests(
@@ -160,8 +162,9 @@ def main() -> None:
     if use_pdf:
         from .reports import generate_combined_pdf
 
-        unity_summary  = unity_pdf_list[0]  if unity_pdf_list  else None
-        lizard_summary = lizard_pdf_list[0] if lizard_pdf_list else None
+        unity_summary    = unity_pdf_list[0]    if unity_pdf_list    else None
+        lizard_summary   = lizard_pdf_list[0]   if lizard_pdf_list   else None
+        valgrind_summary = valgrind_pdf_list[0] if valgrind_pdf_list else None
 
         generate_combined_pdf(
             output_path=report_pdf_path,
@@ -171,6 +174,7 @@ def main() -> None:
             run_dt=run_dt,
             unity=unity_summary,
             lizard=lizard_summary,
+            valgrind=valgrind_summary,
         )
         info(f"PDF report: {report_pdf_path}")
 

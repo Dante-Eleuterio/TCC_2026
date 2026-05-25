@@ -52,6 +52,7 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import mm
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak,
+    CondPageBreak,
 )
 
 
@@ -606,6 +607,674 @@ def _lizard_section(summary: LizardSummary, styles: dict) -> list:
 
 
 # ============================================================================
+#  Valgrind — parser
+# ============================================================================
+#
+# Valgrind escreve em stderr no formato:
+#
+#   ==12345== Memcheck, a memory error detector
+#   ==12345== Copyright (C) ...
+#   ==12345== Command: ./tddl_foo -v
+#   ==12345==
+#   ==12345== Invalid read of size 4
+#   ==12345==    at 0x401234: foo (foo.c:12)
+#   ==12345==    by 0x405678: main (test_foo.c:34)
+#   ==12345==  Address 0x... is 0 bytes after a block of size 4 alloc'd
+#   ==12345==    at 0x...: malloc (...)
+#   ==12345==    by 0x...: foo (foo.c:8)
+#   ==12345==
+#   ==12345== HEAP SUMMARY:
+#   ==12345==     in use at exit: 8 bytes in 1 blocks
+#   ==12345==   total heap usage: 3 allocs, 2 frees, 1,032 bytes allocated
+#   ==12345==
+#   ==12345== 8 bytes in 1 blocks are definitely lost in loss record 1 of 1
+#   ==12345==    at 0x...: malloc (...)
+#   ==12345==    by 0x...: foo (foo.c:8)
+#   ==12345==    by 0x...: main (test_foo.c:30)
+#   ==12345==
+#   ==12345== LEAK SUMMARY:
+#   ==12345==    definitely lost: 8 bytes in 1 blocks
+#   ==12345==    indirectly lost: 0 bytes in 0 blocks
+#   ==12345==      possibly lost: 0 bytes in 0 blocks
+#   ==12345==    still reachable: 0 bytes in 0 blocks
+#   ==12345==         suppressed: 0 bytes in 0 blocks
+#   ==12345==
+#   ==12345== ERROR SUMMARY: 2 errors from 2 contexts (suppressed: 0 from 0)
+#
+# O parser:
+#   1. Tira o prefixo "==PID==" de toda linha.
+#   2. Quebra em "blocos" separados por linhas em branco.
+#   3. Classifica cada bloco: leak/error/heap/leak_summary/error_summary/banner.
+#   4. Extrai stack frames das linhas "at" e "by".
+
+# Cores específicas para categorias de leak / erro do Valgrind.
+COLOR_LEAK_DEFINITE   = colors.HexColor('#c0392b')   # vermelho — pior
+COLOR_LEAK_INDIRECT   = colors.HexColor('#d35400')   # laranja escuro
+COLOR_LEAK_POSSIBLE   = colors.HexColor('#b58900')   # amarelo
+COLOR_LEAK_REACHABLE  = colors.HexColor('#2980b9')   # azul — informativo
+COLOR_LEAK_SUPPRESSED = COLOR_MUTED                  # cinza
+
+# Cabeçalhos típicos de bloco "erro" do valgrind. Não é uma lista exaustiva
+# (o memcheck tem dezenas), mas cobre os mais comuns; qualquer linha que
+# não case com um padrão conhecido vira "Other error" para evitar engolir
+# diagnósticos silenciosamente.
+_VALGRIND_ERROR_HEADS = (
+    'Invalid read',
+    'Invalid write',
+    'Invalid free',
+    'Mismatched free',
+    'Use of uninitialised',
+    'Conditional jump or move depends on uninitialised',
+    'Syscall param',
+    'Source and destination overlap',
+    'Argument',
+)
+
+
+@dataclass
+class ValgrindFrame:
+    """Uma linha de stack ('at 0x...: func (file:line)' ou 'by ...')."""
+    addr: str    # '0x401234' ou '' se não houver
+    func: str    # nome da função ou '???'
+    where: str   # 'file.c:12' / 'in /lib/libc.so' / ''
+
+
+@dataclass
+class ValgrindError:
+    kind:     str                  # 'Invalid read of size 4', 'definitely lost: 8 bytes ...'
+    category: str                  # 'error' | 'leak'
+    severity: str                  # 'definite'|'indirect'|'possible'|'reachable'|'error'
+    frames:   list[ValgrindFrame]  # stack trace principal
+
+
+@dataclass
+class ValgrindLeakCounts:
+    """Bytes/blocks de uma categoria do LEAK SUMMARY."""
+    bytes_:  int
+    blocks:  int
+
+    @property
+    def empty(self) -> bool:
+        return self.bytes_ == 0 and self.blocks == 0
+
+
+@dataclass
+class ValgrindHeapUsage:
+    """
+    Resumo do bloco HEAP SUMMARY do valgrind, ex:
+
+      HEAP SUMMARY:
+          in use at exit: 8 bytes in 1 blocks
+        total heap usage: 3 allocs, 2 frees, 1,032 bytes allocated
+
+    Quando o programa libera tudo direitinho, o valgrind escreve apenas
+    "All heap blocks were freed -- no leaks are possible" e omite essas
+    duas linhas — nesse caso os campos ficam zerados e `present=False`.
+    """
+    allocs:          int
+    frees:           int
+    bytes_allocated: int
+    in_use_bytes:    int
+    in_use_blocks:   int
+    present:         bool   # False se nada do HEAP SUMMARY foi capturado
+
+
+@dataclass
+class ValgrindSummary:
+    errors:           list[ValgrindError]
+    error_count:      int       # total reportado em ERROR SUMMARY
+    contexts:         int       # contextos (do ERROR SUMMARY)
+    suppressed_count: int
+    definitely_lost:  ValgrindLeakCounts
+    indirectly_lost:  ValgrindLeakCounts
+    possibly_lost:    ValgrindLeakCounts
+    still_reachable:  ValgrindLeakCounts
+    suppressed_leak:  ValgrindLeakCounts
+    heap:             ValgrindHeapUsage
+    raw:              str       # diagnóstico bruto, usado se nada parseou
+
+    @property
+    def clean(self) -> bool:
+        # Reachable e suppressed não bloqueiam (default do valgrind também
+        # não falha por reachable). Tudo o resto, sim.
+        return (
+            self.error_count == 0
+            and self.definitely_lost.empty
+            and self.indirectly_lost.empty
+            and self.possibly_lost.empty
+        )
+
+    @property
+    def total_lost_bytes(self) -> int:
+        return (self.definitely_lost.bytes_
+                + self.indirectly_lost.bytes_
+                + self.possibly_lost.bytes_)
+
+
+# Linhas do tipo:
+#   ==12345== Invalid read of size 4
+# ou para leaks:
+#   ==12345== 8 bytes in 1 blocks are definitely lost in loss record 1 of 1
+_VG_PID_PREFIX = re.compile(r'^==\d+==\s?')
+
+# "    at 0x401234: foo (foo.c:12)"  /  "    by 0x401234: foo (in /lib/libc.so.6)"
+_VG_FRAME = re.compile(
+    r'^(?:at|by)\s+'
+    r'(?P<addr>0x[0-9A-Fa-f]+):\s+'
+    r'(?P<func>.+?)\s+'
+    r'\((?P<where>[^)]*)\)\s*$'
+)
+
+# "    definitely lost: 1,234 bytes in 5 blocks"
+_VG_LEAK_LINE = re.compile(
+    r'^\s*(?P<kind>definitely lost|indirectly lost|possibly lost|'
+    r'still reachable|suppressed):\s+'
+    r'(?P<bytes>[\d,]+)\s+bytes\s+in\s+'
+    r'(?P<blocks>[\d,]+)\s+blocks\s*$',
+    re.IGNORECASE,
+)
+
+# "ERROR SUMMARY: 2 errors from 2 contexts (suppressed: 0 from 0)"
+_VG_ERROR_SUMMARY = re.compile(
+    r'^ERROR SUMMARY:\s+(?P<errors>[\d,]+)\s+errors?\s+from\s+'
+    r'(?P<contexts>[\d,]+)\s+contexts?'
+    r'(?:\s+\(suppressed:\s+(?P<sup>[\d,]+)\s+from\s+[\d,]+\))?',
+    re.IGNORECASE,
+)
+
+# "8 bytes in 1 blocks are definitely lost in loss record 1 of 1"
+_VG_LEAK_HEADER = re.compile(
+    r'^(?P<bytes>[\d,]+)\s+bytes\s+in\s+(?P<blocks>[\d,]+)\s+blocks?\s+are\s+'
+    r'(?P<kind>definitely lost|indirectly lost|possibly lost|still reachable)\s+',
+    re.IGNORECASE,
+)
+
+# "  total heap usage: 147 allocs, 147 frees, 9,664 bytes allocated"
+_VG_HEAP_TOTAL = re.compile(
+    r'^\s*total\s+heap\s+usage:\s+'
+    r'(?P<allocs>[\d,]+)\s+allocs?,\s+'
+    r'(?P<frees>[\d,]+)\s+frees?,\s+'
+    r'(?P<bytes>[\d,]+)\s+bytes\s+allocated\s*$',
+    re.IGNORECASE,
+)
+
+# "     in use at exit: 8 bytes in 1 blocks"
+_VG_HEAP_INUSE = re.compile(
+    r'^\s*in\s+use\s+at\s+exit:\s+'
+    r'(?P<bytes>[\d,]+)\s+bytes\s+in\s+'
+    r'(?P<blocks>[\d,]+)\s+blocks?\s*$',
+    re.IGNORECASE,
+)
+
+
+def _atoi(s: str) -> int:
+    """Valgrind imprime números com vírgula como milhar — '1,234' → 1234."""
+    try:
+        return int(s.replace(',', ''))
+    except (ValueError, AttributeError):
+        return 0
+
+
+def _strip_vg_prefix(text: str) -> list[str]:
+    """Remove '==PID== ' de cada linha; descarta linhas sem o prefixo
+    (ruído de outras ferramentas misturado no stderr)."""
+    out: list[str] = []
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        if not line:
+            out.append('')
+            continue
+        m = _VG_PID_PREFIX.match(line)
+        if m:
+            out.append(line[m.end():])
+        # linhas sem prefixo são descartadas — não fazem parte do output
+        # estruturado do valgrind
+    return out
+
+
+def _parse_frame(line: str) -> ValgrindFrame | None:
+    line = line.strip()
+    m = _VG_FRAME.match(line)
+    if not m:
+        return None
+    return ValgrindFrame(
+        addr=m.group('addr'),
+        func=m.group('func').strip(),
+        where=m.group('where').strip(),
+    )
+
+
+def _classify_error_header(header: str) -> tuple[str, str] | None:
+    """
+    Retorna (severity, kind) para a primeira linha de um bloco de erro,
+    ou None se não parece um erro reconhecível.
+    """
+    # Leak header tem o formato "N bytes in M blocks are <kind> lost..."
+    m = _VG_LEAK_HEADER.match(header)
+    if m:
+        kind_word = m.group('kind').lower()
+        severity = {
+            'definitely lost': 'definite',
+            'indirectly lost': 'indirect',
+            'possibly lost':   'possible',
+            'still reachable': 'reachable',
+        }[kind_word]
+        return (severity, header)
+
+    for prefix in _VALGRIND_ERROR_HEADS:
+        if header.startswith(prefix):
+            return ('error', header)
+
+    return None
+
+
+def parse_valgrind_output(text: str) -> ValgrindSummary:
+    """
+    Parseia stderr do valgrind. Tolerante a partes faltantes: se o LEAK
+    SUMMARY não aparecer (sem --leak-check=full numa execução antiga,
+    binário abortou cedo, etc.), os counts ficam zerados; se nenhum
+    bloco de erro parsear, devolve uma summary com `errors=[]` e o raw
+    populado pra debugar.
+    """
+    raw_text = text  # preserva pra raw view
+    lines = _strip_vg_prefix(text)
+
+    # Defaults
+    definitely = ValgrindLeakCounts(0, 0)
+    indirectly = ValgrindLeakCounts(0, 0)
+    possibly   = ValgrindLeakCounts(0, 0)
+    reachable  = ValgrindLeakCounts(0, 0)
+    suppressed = ValgrindLeakCounts(0, 0)
+    heap       = ValgrindHeapUsage(0, 0, 0, 0, 0, present=False)
+    error_count = 0
+    contexts = 0
+    suppressed_count = 0
+    errors: list[ValgrindError] = []
+
+    # 1) Quebra em blocos por linha em branco (o valgrind separa cada
+    #    erro/seção com '==PID==' sozinho, que após strip vira '').
+    block: list[str] = []
+    blocks: list[list[str]] = []
+    for line in lines:
+        if line == '':
+            if block:
+                blocks.append(block)
+                block = []
+        else:
+            block.append(line)
+    if block:
+        blocks.append(block)
+
+    # 2) Para cada bloco, decide o que é.
+    for blk in blocks:
+        head = blk[0].strip()
+
+        # ERROR SUMMARY pode estar sozinho ou como última linha
+        for line in blk:
+            m_es = _VG_ERROR_SUMMARY.match(line.strip())
+            if m_es:
+                error_count      = _atoi(m_es.group('errors'))
+                contexts         = _atoi(m_es.group('contexts'))
+                suppressed_count = _atoi(m_es.group('sup') or '0')
+
+        # HEAP SUMMARY — bloco com "in use at exit" e "total heap usage".
+        # Detectado pela presença do cabeçalho "HEAP SUMMARY:" no bloco;
+        # as duas linhas seguintes batem nos regex específicos.
+        if any('HEAP SUMMARY' in l for l in blk):
+            heap_allocs = heap_frees = heap_bytes = 0
+            heap_in_b   = heap_in_blk = 0
+            heap_got_any = False
+            for l in blk:
+                m_t = _VG_HEAP_TOTAL.match(l)
+                if m_t:
+                    heap_allocs = _atoi(m_t.group('allocs'))
+                    heap_frees  = _atoi(m_t.group('frees'))
+                    heap_bytes  = _atoi(m_t.group('bytes'))
+                    heap_got_any = True
+                    continue
+                m_i = _VG_HEAP_INUSE.match(l)
+                if m_i:
+                    heap_in_b   = _atoi(m_i.group('bytes'))
+                    heap_in_blk = _atoi(m_i.group('blocks'))
+                    heap_got_any = True
+            if heap_got_any:
+                heap = ValgrindHeapUsage(
+                    allocs=heap_allocs, frees=heap_frees,
+                    bytes_allocated=heap_bytes,
+                    in_use_bytes=heap_in_b, in_use_blocks=heap_in_blk,
+                    present=True,
+                )
+            continue   # bloco consumido como HEAP SUMMARY
+
+        # LEAK SUMMARY — bloco onde tem várias linhas "<kind>: N bytes in M blocks"
+        leak_lines = [l for l in blk if _VG_LEAK_LINE.match(l)]
+        if leak_lines and any('LEAK SUMMARY' in l for l in blk):
+            for l in leak_lines:
+                m = _VG_LEAK_LINE.match(l)
+                assert m  # já filtrado
+                kind = m.group('kind').lower()
+                counts = ValgrindLeakCounts(
+                    bytes_=_atoi(m.group('bytes')),
+                    blocks=_atoi(m.group('blocks')),
+                )
+                if   kind == 'definitely lost': definitely = counts
+                elif kind == 'indirectly lost': indirectly = counts
+                elif kind == 'possibly lost':   possibly   = counts
+                elif kind == 'still reachable': reachable  = counts
+                elif kind == 'suppressed':      suppressed = counts
+            continue   # bloco consumido como LEAK SUMMARY
+
+        # Bloco de erro propriamente dito (Invalid read, leak record, etc.)
+        cls = _classify_error_header(head)
+        if cls is None:
+            continue
+        severity, kind = cls
+        frames: list[ValgrindFrame] = []
+        for l in blk[1:]:
+            f = _parse_frame(l)
+            if f is not None:
+                frames.append(f)
+            # paramos no primeiro "Address ... is ..." pra não inflar com
+            # frames secundárias do bloco alloc'd — elas trazem ruído sem
+            # ajudar muito no relatório de uma página. Se quiser cobertura
+            # completa, dá pra remover esse break.
+            elif l.strip().startswith('Address '):
+                break
+        errors.append(ValgrindError(
+            kind=kind,
+            category='leak' if severity in ('definite','indirect','possible','reachable')
+                              else 'error',
+            severity=severity,
+            frames=frames,
+        ))
+
+    return ValgrindSummary(
+        errors=errors,
+        error_count=error_count,
+        contexts=contexts,
+        suppressed_count=suppressed_count,
+        definitely_lost=definitely,
+        indirectly_lost=indirectly,
+        possibly_lost=possibly,
+        still_reachable=reachable,
+        suppressed_leak=suppressed,
+        heap=heap,
+        raw=raw_text,
+    )
+
+
+# ============================================================================
+#  Valgrind — seção do PDF
+# ============================================================================
+
+def _vg_severity_color(severity: str):
+    return {
+        'definite':  COLOR_LEAK_DEFINITE,
+        'indirect':  COLOR_LEAK_INDIRECT,
+        'possible':  COLOR_LEAK_POSSIBLE,
+        'reachable': COLOR_LEAK_REACHABLE,
+        'error':     COLOR_FAIL,
+    }.get(severity, COLOR_NEUTRAL)
+
+
+def _vg_severity_label(severity: str) -> str:
+    return {
+        'definite':  'DEFINITE LEAK',
+        'indirect':  'INDIRECT LEAK',
+        'possible':  'POSSIBLE LEAK',
+        'reachable': 'REACHABLE',
+        'error':     'ERROR',
+    }.get(severity, severity.upper())
+
+
+def _valgrind_cards(summary: ValgrindSummary) -> Table:
+    """
+    3 cards: Errors | Definitely lost (bytes) | Indirect+Possible (bytes).
+
+    Reachable e suppressed ficam pra tabela de leak summary — não cabem
+    nos cards sem poluir.
+    """
+    errs    = summary.error_count
+    def_b   = summary.definitely_lost.bytes_
+    other_b = summary.indirectly_lost.bytes_ + summary.possibly_lost.bytes_
+
+    return _three_cards(
+        values   = (str(errs), f'{def_b:,}', f'{other_b:,}'),
+        labels   = ('ERRORS', 'DEFINITELY LOST', 'INDIRECT+POSSIBLE'),
+        actives  = (errs > 0, def_b > 0, other_b > 0),
+        bg_top   = (COLOR_FAIL_BG, COLOR_FAIL_BG,        COLOR_IGN_BG),
+        bg_label = (COLOR_FAIL,    COLOR_LEAK_DEFINITE,  COLOR_LEAK_POSSIBLE),
+        fg_value = (COLOR_FAIL,    COLOR_LEAK_DEFINITE,  COLOR_LEAK_POSSIBLE),
+    )
+
+
+def _valgrind_heap_table(summary: ValgrindSummary, styles: dict) -> Table:
+    """
+    Tabela compacta com o HEAP SUMMARY do valgrind:
+        Allocations | Frees | Bytes allocated | In use at exit
+    Renderizada como 4 colunas (label em cima, valor embaixo), igual em
+    espírito aos 3-cards mas em formato mais discreto pra info auxiliar.
+    """
+    h = summary.heap
+    leaked = h.allocs - h.frees           # nº de blocos não liberados
+
+    in_use_str = f'{h.in_use_bytes:,} bytes ({h.in_use_blocks:,} blocks)'
+    if h.in_use_bytes == 0 and h.in_use_blocks == 0:
+        in_use_str = '0 bytes (0 blocks)'
+
+    values = [
+        f'{h.allocs:,}',
+        f'{h.frees:,}',
+        f'{h.bytes_allocated:,}',
+        in_use_str,
+    ]
+    labels = ['ALLOCATIONS', 'FREES', 'BYTES ALLOCATED', 'IN USE AT EXIT']
+
+    rows = [values, labels]
+
+    page_width = A4[0] - 30*mm
+    col_w = page_width / 4.0
+    t = Table(rows, colWidths=[col_w]*4, rowHeights=[11*mm, 6*mm])
+
+    # Cor da última coluna ("in use at exit"): vermelha se sobrou bloco,
+    # neutra se zerou. Sinaliza visualmente vazamento bruto.
+    leaked_color  = COLOR_FAIL if leaked > 0 else COLOR_PASS
+    leaked_bg     = COLOR_VIOL_BG if leaked > 0 else COLOR_PASS_BG
+
+    style = [
+        # Linha dos valores
+        ('FONTNAME',  (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE',  (0, 0), (-1, 0), 14),
+        ('ALIGN',     (0, 0), (-1, 0), 'CENTER'),
+        ('VALIGN',    (0, 0), (-1, 0), 'MIDDLE'),
+        ('TEXTCOLOR', (0, 0), (2, 0), COLOR_NEUTRAL),
+        ('TEXTCOLOR', (3, 0), (3, 0), leaked_color),
+        ('BACKGROUND', (0, 0), (2, 0), COLOR_BG_ROW),
+        ('BACKGROUND', (3, 0), (3, 0), leaked_bg),
+
+        # Linha dos labels
+        ('FONTNAME',  (0, 1), (-1, 1), 'Helvetica-Bold'),
+        ('FONTSIZE',  (0, 1), (-1, 1), 8),
+        ('ALIGN',     (0, 1), (-1, 1), 'CENTER'),
+        ('VALIGN',    (0, 1), (-1, 1), 'MIDDLE'),
+        ('TEXTCOLOR', (0, 1), (-1, 1), colors.white),
+        ('BACKGROUND', (0, 1), (2, 1), COLOR_NEUTRAL),
+        ('BACKGROUND', (3, 1), (3, 1), leaked_color),
+
+        ('LEFTPADDING',   (0, 0), (-1, -1), 1),
+        ('RIGHTPADDING',  (0, 0), (-1, -1), 1),
+        ('TOPPADDING',    (0, 0), (-1, -1), 0),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 0),
+    ]
+    t.setStyle(TableStyle(style))
+    return t
+
+
+def _valgrind_leak_table(summary: ValgrindSummary, styles: dict) -> Table:
+    """Tabela com as 5 categorias do LEAK SUMMARY."""
+    rows = [['Category', 'Bytes', 'Blocks']]
+    cats = [
+        ('Definitely lost', summary.definitely_lost,  'definite'),
+        ('Indirectly lost', summary.indirectly_lost,  'indirect'),
+        ('Possibly lost',   summary.possibly_lost,    'possible'),
+        ('Still reachable', summary.still_reachable,  'reachable'),
+        ('Suppressed',      summary.suppressed_leak,  None),
+    ]
+    for label, counts, _sev in cats:
+        rows.append([label, f'{counts.bytes_:,}', f'{counts.blocks:,}'])
+
+    page_width = A4[0] - 30*mm
+    col_widths = [page_width * 0.55, page_width * 0.225, page_width * 0.225]
+    t = Table(rows, colWidths=col_widths, repeatRows=1)
+
+    cmds = [
+        ('BACKGROUND', (0, 0), (-1, 0), COLOR_HEADER),
+        ('TEXTCOLOR',  (0, 0), (-1, 0), colors.white),
+        ('FONTNAME',   (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE',   (0, 0), (-1, 0), 9),
+        ('ALIGN',      (0, 0), (-1, 0), 'LEFT'),
+        ('ALIGN',      (1, 0), (-1, -1), 'RIGHT'),
+        ('FONTNAME',   (0, 1), (-1, -1), 'Helvetica'),
+        ('FONTSIZE',   (0, 1), (-1, -1), 9),
+        ('VALIGN',     (0, 1), (-1, -1), 'MIDDLE'),
+        ('LEFTPADDING',   (0, 0), (-1, -1), 4),
+        ('RIGHTPADDING',  (0, 0), (-1, -1), 4),
+        ('TOPPADDING',    (0, 0), (-1, -1), 3),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+        ('LINEBELOW', (0, 0), (-1, -1), 0.25, COLOR_MUTED),
+    ]
+    for i, (_lbl, counts, sev) in enumerate(cats, start=1):
+        nonzero = not counts.empty
+        if nonzero and sev is not None:
+            cmds.append(('TEXTCOLOR', (0, i), (0, i), _vg_severity_color(sev)))
+            cmds.append(('FONTNAME',  (0, i), (0, i), 'Helvetica-Bold'))
+            cmds.append(('BACKGROUND', (0, i), (-1, i), COLOR_VIOL_BG))
+        elif i % 2 == 0:
+            cmds.append(('BACKGROUND', (0, i), (-1, i), COLOR_BG_ROW))
+    t.setStyle(TableStyle(cmds))
+    return t
+
+
+def _valgrind_error_block(err: ValgrindError, idx: int, styles: dict) -> Table:
+    """
+    Renderiza um único erro como uma mini-tabela:
+        [ SEVERITY ]  kind...
+                      at  0x...: func (file:line)
+                      by  0x...: ...
+    """
+    sev_color = _vg_severity_color(err.severity)
+    sev_label = _vg_severity_label(err.severity)
+
+    kind_para = Paragraph(
+        f'<font color="{_hex_for_para(sev_color)}"><b>#{idx} {sev_label}</b></font> '
+        f'— {err.kind.replace("<", "&lt;").replace(">", "&gt;")}',
+        ParagraphStyle('vg_kind', parent=styles['mono'],
+                       fontSize=8.5, leading=11, wordWrap='CJK'),
+    )
+
+    frame_style = ParagraphStyle(
+        'vg_frame', parent=styles['mono'],
+        fontSize=8, leading=10, wordWrap='CJK',
+        textColor=COLOR_NEUTRAL,
+    )
+
+    rows = [[kind_para]]
+    if err.frames:
+        for i, f in enumerate(err.frames):
+            tag = 'at' if i == 0 else 'by'
+            line = (
+                f'<font color="{_hex_for_para(COLOR_MUTED)}">{tag}</font> '
+                f'{f.addr}: <b>{f.func.replace("<","&lt;").replace(">","&gt;")}</b> '
+                f'<font color="{_hex_for_para(COLOR_MUTED)}">'
+                f'({f.where.replace("<","&lt;").replace(">","&gt;") or "??"})</font>'
+            )
+            rows.append([Paragraph(line, frame_style)])
+    else:
+        rows.append([Paragraph(
+            '<i>No stack frames parsed.</i>',
+            ParagraphStyle('vg_nf', parent=styles['mono'], textColor=COLOR_MUTED),
+        )])
+
+    page_width = A4[0] - 30*mm
+    t = Table(rows, colWidths=[page_width])
+    t.setStyle(TableStyle([
+        ('BACKGROUND',    (0, 0), (-1, 0), COLOR_VIOL_BG),
+        ('LEFTPADDING',   (0, 0), (-1, -1), 6),
+        ('RIGHTPADDING',  (0, 0), (-1, -1), 6),
+        ('TOPPADDING',    (0, 0), (-1, -1), 3),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+        ('LINEBELOW',     (0, 0), (-1, -1), 0.25, COLOR_MUTED),
+        ('LINEBEFORE',    (0, 0), (0, -1),  2,    sev_color),
+    ]))
+    return t
+
+
+def _valgrind_section(summary: ValgrindSummary, styles: dict) -> list:
+    overall_label = 'OK' if summary.clean else 'ERRORS DETECTED'
+    overall_color = COLOR_PASS if summary.clean else COLOR_FAIL
+
+    header_line = (
+        f'<font color="{_hex_for_para(overall_color)}"><b>{overall_label}</b></font> '
+        f'— {summary.error_count} error(s) from {summary.contexts} context(s), '
+        f'{summary.total_lost_bytes:,} byte(s) lost'
+    )
+    if summary.suppressed_count:
+        header_line += f', {summary.suppressed_count} suppressed'
+
+    out: list = [
+        Paragraph(header_line, styles['small_muted']),
+        Spacer(1, 2*mm),
+        _valgrind_cards(summary),
+        Spacer(1, 5*mm),
+    ]
+
+    # Heap usage — só renderiza se o valgrind chegou a emitir o
+    # HEAP SUMMARY (programas que segfaultam antes do exit não emitem).
+    if summary.heap.present:
+        out.append(Paragraph('Heap usage', styles['subsection']))
+        out.append(_valgrind_heap_table(summary, styles))
+        out.append(Spacer(1, 4*mm))
+
+    out.append(Paragraph('Leak summary', styles['subsection']))
+    out.append(_valgrind_leak_table(summary, styles))
+    out.append(Spacer(1, 4*mm))
+
+    # Lista de erros (cada um numa "caixinha" colorida pela severidade).
+    if summary.errors:
+        out.append(Paragraph(
+            f'Errors & leaks ({len(summary.errors)})', styles['subsection']
+        ))
+        for i, err in enumerate(summary.errors, start=1):
+            out.append(_valgrind_error_block(err, i, styles))
+            out.append(Spacer(1, 1.5*mm))
+    elif summary.error_count == 0 and summary.clean:
+        out.append(Paragraph(
+            '<i>No memory errors or leaks detected.</i>',
+            ParagraphStyle('e', parent=styles['mono'], textColor=COLOR_MUTED),
+        ))
+    else:
+        # Valgrind reportou contadores mas não conseguimos parsear os
+        # blocos individuais — mostra o raw bruto pra não perder info.
+        out.append(Paragraph(
+            '<i>Could not parse individual error blocks. '
+            'Showing raw valgrind output:</i>',
+            ParagraphStyle('e', parent=styles['mono'], textColor=COLOR_MUTED),
+        ))
+        # Limita o raw pra não estourar o PDF se vier gigante.
+        raw_clip = summary.raw[:8000]
+        if len(summary.raw) > 8000:
+            raw_clip += '\n... (truncated)'
+        safe_raw = raw_clip.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+        out.append(Paragraph(
+            safe_raw.replace('\n', '<br/>'),
+            ParagraphStyle('vg_raw', parent=styles['mono'],
+                           fontSize=7.5, leading=9, wordWrap='CJK'),
+        ))
+
+    return out
+
+
+# ============================================================================
 #  Capa (metadata global)
 # ============================================================================
 
@@ -633,8 +1302,9 @@ def _cover_metadata(
 
 
 def _global_status(
-    unity: UnitySummary | None,
-    lizard: LizardSummary | None,
+    unity:    UnitySummary    | None,
+    lizard:   LizardSummary   | None,
+    valgrind: ValgrindSummary | None = None,
 ) -> tuple[bool, list[str]]:
     """Decide o status global. Coerente com o exit code do tddl."""
     failures: list[str] = []
@@ -642,6 +1312,8 @@ def _global_status(
         failures.append('tests')
     if lizard is not None and not lizard.clean:
         failures.append('lizard')
+    if valgrind is not None and not valgrind.clean:
+        failures.append('valgrind')
     return (not failures), failures
 
 
@@ -655,8 +1327,9 @@ def generate_combined_pdf(
     src_file:    Path | None,
     mode:        str,
     run_dt:      datetime,
-    unity:       UnitySummary  | None = None,
-    lizard:      LizardSummary | None = None,
+    unity:       UnitySummary    | None = None,
+    lizard:      LizardSummary   | None = None,
+    valgrind:    ValgrindSummary | None = None,
 ) -> None:
     """
     Gera o PDF combinado. Cada ferramenta vira uma seção; se o summary
@@ -674,7 +1347,7 @@ def generate_combined_pdf(
     )
 
     styles = _make_styles()
-    ok, reasons = _global_status(unity, lizard)
+    ok, reasons = _global_status(unity, lizard, valgrind)
     status_label = 'OK' if ok else 'FAILED'
     status_color = COLOR_PASS if ok else COLOR_FAIL
 
@@ -689,15 +1362,30 @@ def generate_combined_pdf(
         Spacer(1, 6*mm),
     ]
 
+    # Helper: separa seções com uma quebra condicional. CondPageBreak só
+    # quebra se restar pouco espaço — evita páginas em branco quando a
+    # seção anterior já tinha empurrado o conteúdo pra uma nova página.
+    _has_section = False
+    def _maybe_break():
+        nonlocal _has_section
+        if _has_section:
+            # ~120mm é folga generosa pra começar uma nova seção com
+            # cards + tabela visíveis ainda na mesma página
+            elements.append(CondPageBreak(120*mm))
+        _has_section = True
+
     if unity is not None:
+        _maybe_break()
         elements.append(Paragraph('Unity tests', styles['section']))
         elements.extend(_unity_section(unity, styles))
 
+    if valgrind is not None:
+        _maybe_break()
+        elements.append(Paragraph('Valgrind memory check', styles['section']))
+        elements.extend(_valgrind_section(valgrind, styles))
+
     if lizard is not None:
-        # Quebra de página antes de lizard se também tivermos unity,
-        # pra não amontoar tudo numa página só.
-        if unity is not None:
-            elements.append(PageBreak())
+        _maybe_break()
         elements.append(Paragraph('Lizard complexity', styles['section']))
         elements.extend(_lizard_section(lizard, styles))
 

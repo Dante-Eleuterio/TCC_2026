@@ -122,17 +122,20 @@ def run_tests(
 
 
 def run_tests_valgrind(
-    build_dir:   Path,
-    target:      str,
-    pdf_collect: list | None = None,
+    build_dir:            Path,
+    target:               str,
+    pdf_collect:          list | None = None,
+    pdf_collect_valgrind: list | None = None,
 ) -> bool:
     """
     Roda sob valgrind. --error-exitcode=1 garante exit !=0 em erro de
     memória mesmo com testes Unity ok.
 
-    Em modo --pdf, captura o stdout (output Unity) para o relatório.
-    Os diagnósticos do valgrind (stderr) continuam visíveis no terminal.
-    O PDF do valgrind em si fica para uma etapa futura.
+    pdf_collect           -> populado com UnitySummary  (stdout do binário)
+    pdf_collect_valgrind  -> populado com ValgrindSummary (stderr do valgrind)
+
+    Em modo --pdf (qualquer das duas listas != None), captura saída
+    completa; sem --pdf, comportamento clássico de output ao vivo.
     """
     executable = _resolve_executable(build_dir, target)
 
@@ -149,19 +152,38 @@ def run_tests_valgrind(
         "-v",
     ]
 
-    if pdf_collect is None:
+    capture = (pdf_collect is not None) or (pdf_collect_valgrind is not None)
+
+    if not capture:
         result = subprocess.run(cmd)
         print()
         return result.returncode == 0
 
     result = subprocess.run(cmd, capture_output=True, text=True)
-    _process_captured_unity(result.stdout, pdf_collect)
 
-    # Valgrind escreve em stderr; mantém visível para o usuário.
+    # Unity (stdout) — sumário curto + populate pdf_collect.
+    if pdf_collect is not None:
+        _process_captured_unity(result.stdout, pdf_collect)
+
+    # Valgrind (stderr) — sempre mostra ao usuário no terminal pra não
+    # esconder os diagnósticos; em modo --pdf, também parseia.
     if result.stderr.strip():
         print()
         info("valgrind diagnostics (stderr):")
         print(result.stderr, end="")
+
+    if pdf_collect_valgrind is not None:
+        from .reports import parse_valgrind_output
+
+        vg_summary = parse_valgrind_output(result.stderr)
+        pdf_collect_valgrind.append(vg_summary)
+
+        status = "clean" if vg_summary.clean else "issues found"
+        info(
+            f"Valgrind: {vg_summary.error_count} error(s), "
+            f"{vg_summary.total_lost_bytes:,} byte(s) lost — {status}"
+        )
+
     return result.returncode == 0
 
 
