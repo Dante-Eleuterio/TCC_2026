@@ -1,6 +1,6 @@
 # BSD 2-Clause License
 #
-# Copyright (c) 2026, Dante Eĺeutério dos Santos
+# Copyright (c) 2026, Dante Eleutério dos Santos
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
@@ -22,18 +22,7 @@
 # CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 # OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-"""
-Resolução de paths externos (Unity, Fil-C) e checagem de ferramentas.
 
-Estratégia de resolução (em ordem):
-  1. Variável de ambiente (UNITY_PATH / FIL_C_PATH) — override explícito.
-  2. ./vendor/ no projeto — local-padrão depois de `tddl --build`.
-  3. Erro com hint pra rodar `tddl --build`.
-
-Isso permite:
-  - "just works" depois do `tddl --build` sem env vars.
-  - reaproveitar uma instalação global via export se quiser.
-"""
 import os
 from pathlib import Path
 import shutil

@@ -1,6 +1,6 @@
 # BSD 2-Clause License
 #
-# Copyright (c) 2026, Dante Eĺeutério dos Santos
+# Copyright (c) 2026, Dante Eleutério dos Santos
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
@@ -32,18 +32,7 @@ from .run import (
 
 
 def _parse_int_flag(args: list[str], flag_prefix: str, use_lizard: bool, default: int) -> int:
-    """
-    Procura uma flag no formato '<flag_prefix>N' (e.g. '--ccn=10') na lista
-    de args, valida que o valor é um inteiro >= 1, e retorna o valor
-    parseado. Se a flag não estiver presente, retorna `default`.
-
-    Falha (via die) se:
-      - a flag estiver presente mas sem valor numérico válido
-      - a flag estiver presente sem --lizard (não teria efeito)
-
-    Padrão `--<nome>=<valor>` é o mesmo para todas as flags de threshold,
-    então extraí esta função pra evitar três cópias quase idênticas.
-    """
+    
     found = next((a for a in args if a.startswith(flag_prefix)), None)
     if found is None:
         return default

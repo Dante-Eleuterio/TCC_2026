@@ -1,6 +1,6 @@
 # BSD 2-Clause License
 #
-# Copyright (c) 2026, Dante Eĺeutério dos Santos
+# Copyright (c) 2026, Dante Eleutério dos Santos
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
@@ -1321,6 +1321,352 @@ def _valgrind_section(summary: ValgrindSummary, styles: dict) -> list:
 
 
 # ============================================================================
+#  Coverage — parser (gcovr summary.json)
+# ============================================================================
+
+@dataclass
+class CoverageMetric:
+    """Uma métrica de cobertura: covered, total e percentual."""
+    covered: int
+    total:   int
+    percent: float
+
+
+@dataclass
+class CoverageFileReport:
+    """Resultados de cobertura para um único arquivo.
+
+    uncovered_lines: linhas com count == 0 no JSON detalhado do gcovr,
+    ordenadas. Vazio quando o details.json não está disponível
+    (compat retroativa) ou quando a cobertura é 100%.
+    """
+    filename: str
+    lines:     CoverageMetric
+    functions: CoverageMetric
+    branches:  CoverageMetric
+    uncovered_lines: list[int] = field(default_factory=list)
+
+
+@dataclass
+class CoverageSummary:
+    """Resultados completos de cobertura para esta execução."""
+    files:     list[CoverageFileReport]
+    lines:     CoverageMetric
+    functions: CoverageMetric
+    branches:  CoverageMetric
+
+    @property
+    def complete(self) -> bool:
+        # Coerente com a regra do tddl: cobertura inferior a 100% das
+        # linhas é tratada como falha (gate, não métrica auxiliar).
+        return self.lines.percent >= 100.0
+
+
+def _coverage_metric_from_dict(d: dict, prefix: str) -> CoverageMetric:
+    """Extrai uma métrica do JSON do gcovr.
+
+    prefix ∈ {'line', 'function', 'branch'}.
+    Retorna (0, 0, 0.0) quando o gcovr não reportou a métrica
+    (pode acontecer em projetos sem branches, por exemplo).
+    """
+    return CoverageMetric(
+        covered=int(d.get(f'{prefix}_covered', 0) or 0),
+        total=int(d.get(f'{prefix}_total',     0) or 0),
+        percent=float(d.get(f'{prefix}_percent', 0.0) or 0.0),
+    )
+
+
+def _extract_uncovered_lines(details_data: dict) -> dict[str, list[int]]:
+    """Lê o JSON detalhado do gcovr (--json) e retorna, por arquivo,
+    a lista ordenada de linhas não cobertas.
+
+    Estrutura esperada (gcovr 0.x):
+        {
+          "files": [
+            {
+              "file": "src/grafo.c",          # ou "filename" em versões antigas
+              "lines": [
+                {"line_number": 10, "count": 5, ...},
+                {"line_number": 11, "count": 0, ...},
+                ...
+              ]
+            }
+          ]
+        }
+
+    Uma linha é considerada não-coberta quando count == 0 e
+    gcovr/excluded != True. Linhas excluídas via marcadores são
+    desconsideradas.
+    """
+    out: dict[str, list[int]] = {}
+    for f in details_data.get('files', []):
+        # 'file' é o nome canônico no formato detalhado; algumas versões
+        # mais antigas usavam 'filename'. Aceitamos ambos por robustez.
+        fname = f.get('file') or f.get('filename') or '?'
+        uncovered: list[int] = []
+        for ln in f.get('lines', []):
+            if ln.get('gcovr/excluded') is True:
+                continue
+            if int(ln.get('count', 0) or 0) == 0:
+                uncovered.append(int(ln['line_number']))
+        uncovered.sort()
+        # Dedup defensivo — gcovr pode emitir uma entrada por função
+        # inlined, fazendo a mesma linha aparecer múltiplas vezes.
+        seen: set[int] = set()
+        deduped: list[int] = []
+        for n in uncovered:
+            if n not in seen:
+                seen.add(n)
+                deduped.append(n)
+        out[fname] = deduped
+    return out
+
+
+def parse_coverage_json(json_path: Path) -> CoverageSummary:
+    """Parseia summary.json do gcovr e devolve CoverageSummary.
+
+    O arquivo principal é produzido por `gcovr --json-summary-pretty`.
+    Se houver um `details.json` no mesmo diretório (produzido por
+    `gcovr --json`), este será consultado para extrair, por arquivo,
+    a lista de linhas não cobertas — exibida na seção do PDF.
+
+    A ausência de details.json é tratada de forma silenciosa: a lista
+    uncovered_lines fica vazia em todos os arquivos.
+    """
+    import json
+    data = json.loads(Path(json_path).read_text())
+
+    # Tenta carregar o JSON detalhado, ao lado do summary.
+    uncovered_by_file: dict[str, list[int]] = {}
+    details_path = Path(json_path).parent / 'details.json'
+    if details_path.exists():
+        try:
+            details_data = json.loads(details_path.read_text())
+            uncovered_by_file = _extract_uncovered_lines(details_data)
+        except (json.JSONDecodeError, OSError):
+            # Falha do JSON detalhado não invalida o relatório de
+            # cobertura — perdemos só a lista de linhas, não o resto.
+            uncovered_by_file = {}
+
+    files: list[CoverageFileReport] = []
+    for f in data.get('files', []):
+        filename = f.get('filename', '?')
+        files.append(CoverageFileReport(
+            filename=filename,
+            lines    =_coverage_metric_from_dict(f, 'line'),
+            functions=_coverage_metric_from_dict(f, 'function'),
+            branches =_coverage_metric_from_dict(f, 'branch'),
+            uncovered_lines=uncovered_by_file.get(filename, []),
+        ))
+
+    return CoverageSummary(
+        files=files,
+        lines    =_coverage_metric_from_dict(data, 'line'),
+        functions=_coverage_metric_from_dict(data, 'function'),
+        branches =_coverage_metric_from_dict(data, 'branch'),
+    )
+
+
+def _format_line_ranges(lines: list[int]) -> str:
+    """Comprime uma lista ordenada de inteiros em ranges legíveis.
+
+    Exemplos:
+        [8]                              -> '8'
+        [8, 9, 10]                       -> '8-10'
+        [8, 13]                          -> '8, 13'
+        [8, 9, 10, 13, 50, 51, 52, 72]   -> '8-10, 13, 50-52, 72'
+        []                               -> ''
+    """
+    if not lines:
+        return ''
+    parts: list[str] = []
+    start = prev = lines[0]
+    for n in lines[1:]:
+        if n == prev + 1:
+            prev = n
+            continue
+        parts.append(str(start) if start == prev else f'{start}-{prev}')
+        start = prev = n
+    parts.append(str(start) if start == prev else f'{start}-{prev}')
+    return ', '.join(parts)
+
+
+# ============================================================================
+#  Coverage — gerador da seção
+# ============================================================================
+
+def _coverage_cards(summary: CoverageSummary) -> Table:
+    """3 cards: % linhas / % funções / % branches.
+
+    Linhas é o gate; quando <100% pintamos em vermelho (falha).
+    Funções e branches são métricas auxiliares; quando <100% pintamos
+    em âmbar (aviso, mas não falha do tddl).
+    """
+    def _fmt_pct(m: CoverageMetric) -> str:
+        # Inteiro quando exato, uma decimal caso contrário.
+        if m.percent == int(m.percent):
+            return f'{int(m.percent)}%'
+        return f'{m.percent:.1f}%'
+
+    lines_full     = summary.lines.percent     >= 100.0
+    functions_full = summary.functions.percent >= 100.0
+    branches_full  = summary.branches.percent  >= 100.0
+
+    # Para o card de linhas, "ativo" = abaixo de 100% (estado de alerta).
+    # Para funções/branches, idem mas em âmbar.
+    return _three_cards(
+        values  = (_fmt_pct(summary.lines),
+                   _fmt_pct(summary.functions),
+                   _fmt_pct(summary.branches)),
+        labels  = ('LINES', 'FUNCTIONS', 'BRANCHES'),
+        actives = (not lines_full, not functions_full, not branches_full),
+        bg_top   = (COLOR_FAIL_BG, COLOR_IGN_BG, COLOR_IGN_BG),
+        bg_label = (COLOR_FAIL,    COLOR_IGNORE, COLOR_IGNORE),
+        fg_value = (COLOR_FAIL,    COLOR_IGNORE, COLOR_IGNORE),
+        # Quando a métrica está em 100%, queremos apresentação verde —
+        # sobrescrevemos os "inativos" para a paleta de sucesso.
+        inactive_top=COLOR_PASS_BG,
+        inactive_label=COLOR_PASS,
+        inactive_value=COLOR_PASS,
+    )
+
+
+def _coverage_files_table(summary: CoverageSummary, styles: dict) -> Table:
+    """Tabela por arquivo: Filename | Lines | Functions | Branches.
+
+    Cada coluna numérica mostra "covered/total (pct%)". Quando há um
+    único arquivo, ainda assim mostramos a tabela — repete os números
+    dos cards, mas torna explícito o nome do arquivo medido.
+    """
+    header = ['File', 'Lines', 'Functions', 'Branches']
+    rows: list[list] = [header]
+
+    name_style = ParagraphStyle(
+        'CovName', parent=styles['mono'], fontSize=8,
+        leading=10, wordWrap='CJK',
+    )
+
+    def _fmt(m: CoverageMetric) -> str:
+        if m.total == 0:
+            return '—'
+        pct = f'{int(m.percent)}%' if m.percent == int(m.percent) else f'{m.percent:.1f}%'
+        return f'{m.covered}/{m.total} ({pct})'
+
+    for f in summary.files:
+        rows.append([
+            Paragraph(f.filename, name_style),
+            _fmt(f.lines),
+            _fmt(f.functions),
+            _fmt(f.branches),
+        ])
+
+    page_width = A4[0] - 30*mm
+    file_w = page_width * 0.40
+    num_w  = (page_width - file_w) / 3.0
+    col_widths = [file_w, num_w, num_w, num_w]
+
+    table = Table(rows, colWidths=col_widths, repeatRows=1)
+
+    cmds = [
+        ('BACKGROUND', (0, 0), (-1, 0), COLOR_HEADER),
+        ('TEXTCOLOR',  (0, 0), (-1, 0), colors.white),
+        ('FONTNAME',   (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE',   (0, 0), (-1, 0), 9),
+        ('ALIGN',      (0, 0), (-1, 0), 'LEFT'),
+        ('ALIGN',      (1, 0), (-1, -1), 'RIGHT'),
+        ('FONTNAME',   (0, 1), (-1, -1), 'Helvetica'),
+        ('FONTSIZE',   (0, 1), (-1, -1), 8.5),
+        ('VALIGN',     (0, 1), (-1, -1), 'TOP'),
+        ('LEFTPADDING',   (0, 0), (-1, -1), 3),
+        ('RIGHTPADDING',  (0, 0), (-1, -1), 3),
+        ('TOPPADDING',    (0, 0), (-1, -1), 3),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+        ('LINEBELOW', (0, 0), (-1, -1), 0.25, COLOR_MUTED),
+    ]
+    # Zebrado, e destaque vermelho para arquivos com line_percent < 100%
+    for i, f in enumerate(summary.files, start=1):
+        if f.lines.percent < 100.0:
+            cmds.append(('TEXTCOLOR', (1, i), (1, i), COLOR_FAIL))
+            cmds.append(('FONTNAME',  (1, i), (1, i), 'Helvetica-Bold'))
+        elif i % 2 == 0:
+            cmds.append(('BACKGROUND', (0, i), (-1, i), COLOR_BG_ROW))
+
+    table.setStyle(TableStyle(cmds))
+    return table
+
+
+def _coverage_uncovered_block(
+    summary: CoverageSummary, styles: dict,
+) -> list:
+    """Bloco com 'Uncovered lines per file' — só inclui arquivos com
+    pelo menos uma linha não-coberta. Retorna [] se todos os arquivos
+    estiverem em 100% (ou se o details.json não estava disponível e
+    nenhum uncovered_lines foi populado).
+    """
+    files_with_gaps = [f for f in summary.files if f.uncovered_lines]
+    if not files_with_gaps:
+        return []
+
+    out: list = [
+        Spacer(1, 4*mm),
+        Paragraph('Uncovered lines', styles['subsection']),
+    ]
+
+    # Estilo monoespaçado para os ranges (linhas/ranges são números
+    # e ficam mais legíveis em mono); wordWrap='CJK' para permitir
+    # quebra em ranges longos.
+    range_style = ParagraphStyle(
+        'CovRange', parent=styles['mono'], fontSize=8.5,
+        leading=11, wordWrap='CJK', textColor=COLOR_FAIL,
+    )
+    label_style = ParagraphStyle(
+        'CovFileLabel', parent=styles['small_muted'],
+        fontSize=9, textColor=COLOR_NEUTRAL,
+    )
+
+    for f in files_with_gaps:
+        ranges_txt = _format_line_ranges(f.uncovered_lines)
+        # Cabeçalho com nome do arquivo + contagem absoluta.
+        n = len(f.uncovered_lines)
+        plural = 'line' if n == 1 else 'lines'
+        out.append(Paragraph(
+            f'<b>{f.filename}</b> — {n} uncovered {plural}',
+            label_style,
+        ))
+        out.append(Paragraph(ranges_txt, range_style))
+        out.append(Spacer(1, 2*mm))
+
+    return out
+
+
+def _coverage_section(summary: CoverageSummary, styles: dict) -> list:
+    overall_label = 'OK' if summary.complete else 'INCOMPLETE'
+    overall_color = COLOR_PASS if summary.complete else COLOR_FAIL
+
+    pct_str = (
+        f'{int(summary.lines.percent)}%'
+        if summary.lines.percent == int(summary.lines.percent)
+        else f'{summary.lines.percent:.1f}%'
+    )
+
+    out: list = [
+        Paragraph(
+            f'<font color="{_hex_for_para(overall_color)}"><b>{overall_label}</b></font> '
+            f'— {summary.lines.covered}/{summary.lines.total} lines covered ({pct_str}), '
+            f'{len(summary.files)} file(s)',
+            styles['small_muted'],
+        ),
+        Spacer(1, 2*mm),
+        _coverage_cards(summary),
+        Spacer(1, 5*mm),
+    ]
+    if summary.files:
+        out.append(_coverage_files_table(summary, styles))
+        out.extend(_coverage_uncovered_block(summary, styles))
+    return out
+
+
+# ============================================================================
 #  Capa (metadata global)
 # ============================================================================
 
@@ -1351,11 +1697,14 @@ def _global_status(
     unity:    UnitySummary    | None,
     lizard:   LizardSummary   | None,
     valgrind: ValgrindSummary | None = None,
+    coverage: CoverageSummary | None = None,
 ) -> tuple[bool, list[str]]:
     """Decide o status global. Coerente com o exit code do tddl."""
     failures: list[str] = []
     if unity is not None and not unity.overall_ok:
         failures.append('tests')
+    if coverage is not None and not coverage.complete:
+        failures.append('coverage')
     if lizard is not None and not lizard.clean:
         failures.append('lizard')
     if valgrind is not None and not valgrind.clean:
@@ -1376,6 +1725,7 @@ def generate_combined_pdf(
     unity:       UnitySummary    | None = None,
     lizard:      LizardSummary   | None = None,
     valgrind:    ValgrindSummary | None = None,
+    coverage:    CoverageSummary | None = None,
 ) -> None:
     """
     Gera o PDF combinado. Cada ferramenta vira uma seção; se o summary
@@ -1393,7 +1743,7 @@ def generate_combined_pdf(
     )
 
     styles = _make_styles()
-    ok, reasons = _global_status(unity, lizard, valgrind)
+    ok, reasons = _global_status(unity, lizard, valgrind, coverage)
     status_label = 'OK' if ok else 'FAILED'
     status_color = COLOR_PASS if ok else COLOR_FAIL
 
@@ -1424,6 +1774,11 @@ def generate_combined_pdf(
         _maybe_break()
         elements.append(Paragraph('Unity tests', styles['section']))
         elements.extend(_unity_section(unity, styles))
+
+    if coverage is not None:
+        _maybe_break()
+        elements.append(Paragraph('Coverage', styles['section']))
+        elements.extend(_coverage_section(coverage, styles))
 
     if valgrind is not None:
         _maybe_break()

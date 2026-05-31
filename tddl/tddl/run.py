@@ -1,6 +1,6 @@
 # BSD 2-Clause License
 #
-# Copyright (c) 2026, Dante Eĺeutério dos Santos
+# Copyright (c) 2026, Dante Eleutério dos Santos
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
@@ -188,11 +188,12 @@ def run_tests_valgrind(
 
 
 def run_gcovr(
-    root:      Path,
-    build_dir: Path,
-    test_file: Path,
-    test_dir:  Path,
-    src_file:  Path | None = None,
+    root:        Path,
+    build_dir:   Path,
+    test_file:   Path,
+    test_dir:    Path,
+    src_file:    Path | None = None,
+    pdf_collect: list | None = None,
 ) -> bool:
     """
     Roda o gcovr e retorna True se a cobertura de linhas for 100%.
@@ -200,6 +201,11 @@ def run_gcovr(
     Quando src_file é fornecido, o gcovr é restrito a esse arquivo via
     --filter. Sempre gera resumo no terminal, summary.json, e relatório
     HTML em project/coverage/<test_dir>/index.html.
+
+    pdf_collect=None  -> comportamento clássico.
+    pdf_collect=[]    -> além de gerar tudo o que já gerava, parseia o
+                          summary.json e popula a lista com CoverageSummary
+                          para a geração do PDF combinado.
     """
     coverages_dir = root / "coverage"
     coverages_dir.mkdir(exist_ok=True)
@@ -209,8 +215,9 @@ def run_gcovr(
         shutil.rmtree(test_coverage_dir)
     test_coverage_dir.mkdir(exist_ok=True)
 
-    html_output = test_coverage_dir / "index.html"
-    json_output = test_coverage_dir / "summary.json"
+    html_output    = test_coverage_dir / "index.html"
+    json_output    = test_coverage_dir / "summary.json"
+    details_output = test_coverage_dir / "details.json"
 
     filter_args: list[str] = []
     if src_file is not None:
@@ -236,6 +243,19 @@ def run_gcovr(
         *filter_args,
         "--json-summary-pretty",
         "-o", str(json_output),
+        str(build_dir),
+    ])
+
+    # JSON detalhado: contém o array `lines` por arquivo, necessário pra
+    # identificar quais linhas específicas não foram cobertas. Gerado em
+    # paralelo ao summary; parse_coverage_json no reports.py vai
+    # consumi-lo automaticamente se existir.
+    subprocess.run([
+        "gcovr",
+        "--root", str(root),
+        *filter_args,
+        "--json", "--json-pretty",
+        "-o", str(details_output),
         str(build_dir),
     ])
 
@@ -278,6 +298,13 @@ def run_gcovr(
         return False
 
     info(f"Coverage: {lines_covered}/{lines_total} lines ({line_percent:.2f}%)")
+
+    # Em modo --pdf, parseamos o summary.json em uma estrutura tipada
+    # para a seção de Coverage do relatório consolidado. Reaproveitamos
+    # o mesmo JSON que acabamos de produzir.
+    if pdf_collect is not None:
+        from .reports import parse_coverage_json
+        pdf_collect.append(parse_coverage_json(json_output))
 
     if line_percent >= 100.0:
         info("Coverage: 100% — PASS")

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # BSD 2-Clause License
 #
-# Copyright (c) 2026, Dante Eĺeutério dos Santos
+# Copyright (c) 2026, Dante Eleutério dos Santos
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
@@ -112,18 +112,11 @@ def main() -> None:
         include_paths_list
     )
 
-    # ---------------- PDF setup ----------------
-    # Quando --pdf está ativo, as funções run_* recebem listas onde
-    # depositam seus Summary objects. Depois de tudo rodar, montamos
-    # o PDF combinado chamando reports.generate_combined_pdf.
-    #
-    # Path: <project>/reports/<test_stem>/report.pdf
-    # (genérico — não "tests.pdf" porque o relatório agora cobre todas
-    # as ferramentas, não só os testes Unity)
     report_pdf_path: Path | None = None
     unity_pdf_list:    list = []
     lizard_pdf_list:   list = []
     valgrind_pdf_list: list = []
+    coverage_pdf_list: list = []
     run_dt = datetime.now()   # timestamp consistente entre logs e PDF
 
     if use_pdf:
@@ -155,6 +148,7 @@ def main() -> None:
             coverage_full = run_gcovr(
                 root, build_dir, test_file, test_dir,
                 src_file=src_file,
+                pdf_collect=(coverage_pdf_list if use_pdf else None),
             )
         elif not tests_passed:
             info("Tests FAILED")
@@ -179,6 +173,7 @@ def main() -> None:
         unity_summary    = unity_pdf_list[0]    if unity_pdf_list    else None
         lizard_summary   = lizard_pdf_list[0]   if lizard_pdf_list   else None
         valgrind_summary = valgrind_pdf_list[0] if valgrind_pdf_list else None
+        coverage_summary = coverage_pdf_list[0] if coverage_pdf_list else None
 
         generate_combined_pdf(
             output_path=report_pdf_path,
@@ -189,6 +184,7 @@ def main() -> None:
             unity=unity_summary,
             lizard=lizard_summary,
             valgrind=valgrind_summary,
+            coverage=coverage_summary,
         )
         info(f"PDF report: {report_pdf_path}")
 

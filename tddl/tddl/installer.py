@@ -1,6 +1,6 @@
 # BSD 2-Clause License
 #
-# Copyright (c) 2026, Dante Eĺeutério dos Santos
+# Copyright (c) 2026, Dante Eleutério dos Santos
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
@@ -22,28 +22,7 @@
 # CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 # OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-"""
-Instala / verifica as ferramentas que o tddl depende:
 
-  System (via package manager, precisa sudo):
-    - cmake, valgrind, gcovr, git, build-essential / equivalente
-
-  Python (via pipx ou pip --user):
-    - lizard, gcovr (fallback), reportlab
-
-  Vendored (clonado em ./vendor/):
-    - Unity (sempre)
-    - Fil-C (apenas via --build-filc, demora 30-60 min)
-
-Estratégia:
-  1. Detecta OS / package manager.
-  2. Para cada tool já instalada (which X), pula.
-  3. Para tools faltando, instala via pacote do sistema (com sudo) ou pipx.
-  4. Clona Unity em ./vendor/unity/.
-  5. Cria/atualiza .gitignore pra ignorar vendor/.
-
-Tudo idempotente — rodar `tddl --build` 2x não quebra nada.
-"""
 import os
 import platform
 import shutil

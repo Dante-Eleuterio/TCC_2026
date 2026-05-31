@@ -1,6 +1,6 @@
 /* BSD 2-Clause License
  *
- * Copyright (c) 2026, Dante Eĺeutério dos Santos
+ * Copyright (c) 2026, Dante Eleutério dos Santos
  * 
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
