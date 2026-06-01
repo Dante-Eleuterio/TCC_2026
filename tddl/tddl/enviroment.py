@@ -1,6 +1,6 @@
 # BSD 2-Clause License
 #
-# Copyright (c) 2026, Dante Eĺeutério dos Santos
+# Copyright (c) 2026, Dante Eleutério dos Santos
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
@@ -22,46 +22,127 @@
 # CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 # OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
 import os
 from pathlib import Path
 import shutil
 
-from .helpers import *
+from .helpers import die, info
 
-def get_unity_path() -> Path:
+
+def _vendor_unity(root: Path) -> Path:
+    return root / "vendor" / "unity"
+
+
+def _vendor_filc_clang(root: Path) -> Path:
+    return root / "vendor" / "filc" / "build" / "bin" / "clang"
+
+
+def get_unity_path(root: Path | None = None) -> Path:
+    
+    if root is None:
+        root = Path.cwd()
+
+    # 1) Env var como override
     raw = os.environ.get("UNITY_PATH")
-    if not raw:
-        die(
-            "UNITY_PATH is not set.\n"
-            "  Add the following line to your ~/.bashrc or ~/.zshrc:\n"
-            "      export UNITY_PATH=\"/path/to/Unity\"\n"
-            "  Then run:  source ~/.bashrc"
-        )
-    unity = Path(raw)
-    if not unity.is_dir():
-        die(f"UNITY_PATH points to a non-existent directory: {unity}")
-    if not (unity / "src" / "unity.c").exists():
-        die(f"Could not find unity.c inside UNITY_PATH/src: {unity / 'src' / 'unity.c'}")
-    return unity
+    if raw:
+        unity = Path(raw)
+        if not unity.is_dir():
+            die(
+                f"UNITY_PATH is set but points to a non-existent directory:\n"
+                f"  {unity}\n"
+                f"  Either fix the path, or `unset UNITY_PATH` to fall back\n"
+                f"  to the vendored Unity at {_vendor_unity(root)}."
+            )
+        if not (unity / "src" / "unity.c").exists():
+            die(
+                f"UNITY_PATH is set but doesn't look like a Unity checkout:\n"
+                f"  Expected: {unity / 'src' / 'unity.c'}\n"
+                f"  Either fix the path, or `unset UNITY_PATH` to fall back\n"
+                f"  to the vendored Unity at {_vendor_unity(root)}."
+            )
+        return unity
 
-def get_filc_path() -> Path:
+    # 2) Vendor dir do projeto
+    vendored = _vendor_unity(root)
+    if (vendored / "src" / "unity.c").exists():
+        return vendored
+
+    # 3) Não achou — hint claro
+    die(
+        "Unity not found.\n"
+        f"  Looked at: {vendored}\n"
+        "  Run `tddl --build` from the project root to install Unity automatically,\n"
+        "  or set UNITY_PATH=/path/to/Unity to use an existing installation."
+    )
+
+
+def get_filc_path(root: Path | None = None) -> Path:
+   
+    if root is None:
+        root = Path.cwd()
+
+    # 1) Env var como override
     raw = os.environ.get("FIL_C_PATH")
-    if not raw:
-        die(
-            "FIL_C_PATH is not set.\n"
-            "  Add the following line to your ~/.bashrc or ~/.zshrc:\n"
-            "      export FIL_C_PATH=\"/path/to/fil-c/build/llvm-project/build/bin/clang\"\n"
-            "  Then run:  source ~/.bashrc"
-        )
-    filc = Path(raw)
-    if not filc.is_file():
-        die(f"FIL_C_PATH points to a non-existent file: {filc}")
-    return filc
+    if raw:
+        filc = Path(raw)
+        if not filc.is_file():
+            die(
+                f"FIL_C_PATH is set but points to a non-existent file:\n"
+                f"  {filc}\n"
+                f"  Either fix the path, or `unset FIL_C_PATH` to fall back\n"
+                f"  to the vendored Fil-C at {_vendor_filc_clang(root)}."
+            )
+        return filc
 
-def check_tools(use_coverage) -> None:
-    tools = ["cmake"]
+    # 2) Vendor dir do projeto
+    vendored = _vendor_filc_clang(root)
+    if vendored.is_file():
+        return vendored
+
+    # 3) Não achou
+    die(
+        "Fil-C clang binary not found.\n"
+        f"  Looked at: {vendored}\n"
+        "  Run `tddl --build-filc` from the project root to build Fil-C automatically\n"
+        "  (takes 30-60 minutes), or set FIL_C_PATH=/path/to/clang to use an\n"
+        "  existing build."
+    )
+
+
+def check_tools(
+    use_coverage: bool,
+    use_valgrind: bool = False,
+    use_lizard:   bool = False,
+    use_pdf:      bool = False,
+) -> None:
+   
+    # Lista de pares (tool, flag-que-requer). cmake é sempre necessário.
+    required: list[tuple[str, str | None]] = [("cmake", None)]
     if use_coverage:
-        tools.append("gcovr")
-    for tool in tools:
-        if not shutil.which(tool):
-            die(f"Required tool not found in PATH: {tool}")
+        required.append(("gcovr",    "--coverage"))
+    if use_valgrind:
+        required.append(("valgrind", "--valgrind"))
+    if use_lizard:
+        required.append(("lizard",   "--lizard"))
+
+    for tool, flag in required:
+        if shutil.which(tool):
+            continue
+        reason = (f" (needed for {flag})" if flag else
+                  " (always required to build tests)")
+        die(
+            f"Required tool not found in PATH: {tool}{reason}\n"
+            f"  Run `tddl --build` to install missing dependencies,\n"
+            f"  or `tddl --doctor` to see the full diagnostic."
+        )
+
+    if use_pdf:
+        try:
+            import reportlab  # noqa: F401
+        except ImportError:
+            die(
+                "Python package 'reportlab' is required for --pdf but is not\n"
+                "  importable. Run `tddl --build` to install it, or install\n"
+                "  manually with: pip install --user reportlab"
+            )

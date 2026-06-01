@@ -1,6 +1,6 @@
 # BSD 2-Clause License
 #
-# Copyright (c) 2026, Dante Eĺeutério dos Santos
+# Copyright (c) 2026, Dante Eleutério dos Santos
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
@@ -28,34 +28,45 @@ from .helpers import die, info
 import re
 
 
-def get_root() -> Path: 
+def get_root() -> Path:
     return Path.cwd()
 
 
 def resolve_paths(arg: str) -> tuple[Path, Path, Path]:
+    
     filename = Path(arg).name
-
+ 
     if not filename.endswith(".c"):
         die(f"Expected a .c filename, got: {arg}")
-
+ 
     root          = get_root()
     all_tests_dir = root / "tests"
     stem          = Path(filename).stem
     test_dir      = all_tests_dir / stem
     test_file     = test_dir / filename
-
+    
     if not all_tests_dir.is_dir():
         die(
             f"tests/ directory not found in: {root}\n"
-            f"  Make sure you are running tddl from the project root and the project is built"
+            f"  Make sure you are running tddl from the project root.\n"
+            f"  If this is a fresh project, run `tddl --build` to bootstrap it."
         )
-
+ 
+    if not test_dir.is_dir():
+        die(
+            f"Test subdirectory not found: {test_dir}\n"
+            f"  Expected layout: tests/{stem}/{filename}\n"
+            f"  Create the directory and place the test file inside it:\n"
+            f"      mkdir -p tests/{stem} && touch tests/{stem}/{filename}"
+        )
+ 
     if not test_file.exists():
         die(
             f"Test file not found: {test_file}\n"
-            f"  Please create it manually with your Unity tests inside #ifdef TEST."
+            f"  The directory exists but the .c file inside it doesn't.\n"
+            f"  Create it and write your Unity tests inside #ifdef TEST."
         )
-
+ 
     return root, test_dir, test_file
 
 
@@ -65,14 +76,37 @@ def resolve_src_file(root: Path, src_arg: str) -> Path:
 
     if not src_file.exists():
         die(
-            f"Source file not found: {src_file}\n"
-            f"  Make sure the file exists in <project>/src/"
+            f"--src file not found: {src_file}\n"
+            f"  Looked under {root / 'src'}. Make sure the file exists there\n"
+            f"  and you passed only the basename (e.g. --src list.c, not\n"
+            f"  --src src/list.c)."
         )
 
     return src_file
 
-
 def ensure_structure(root: Path) -> None:
+    dirs = {
+        "include": root / "include",
+        "src":     root / "src",
+        "tests":   root / "tests",
+    }
+
+    not_exists = []
+
+    for name, path in dirs.items():
+        if not path.is_dir():
+            not_exists.append(name)
+
+    if len(not_exists) > 0:
+        names_list = ", ".join(not_exists)
+        die(
+            f"Required project directory/directories missing: {names_list}.\n"
+            f"  Run `tddl --build` from the project root to create them,\n"
+            f"  or `mkdir {names_list}` if you only need the folders."
+        )
+
+
+def create_structure(root: Path) -> None:
     dirs = {
         "include": root / "include",
         "src":     root / "src",
@@ -91,22 +125,50 @@ def ensure_structure(root: Path) -> None:
     else:
         info("Project structure already exists — no directories created.")
 
-def extract_wrap_funcs(test_file: Path) -> list[str]:
-    source = test_file.read_text()
 
-    # matches: any return type, then __wrap_funcname, then (
+def extract_wrap_funcs(files: list[Path | str]) -> list[str]:
     pattern = re.compile(r'\b__wrap_(\w+)\s*\(')
-    matches = pattern.findall(source)
 
-    # deduplicate while preserving order
     seen = set()
     wrap_funcs = []
-    for fn in matches:
-        if fn not in seen:
-            seen.add(fn)
-            wrap_funcs.append(fn)
+
+    for file in files:
+        file = Path(file)
+
+        source = file.read_text()
+
+        matches = pattern.findall(source)
+
+        for fn in matches:
+            if fn not in seen:
+                seen.add(fn)
+                wrap_funcs.append(fn)
 
     if wrap_funcs:
         info(f"Found wrapped functions: {', '.join(wrap_funcs)}")
 
     return wrap_funcs
+
+def find_includes(root: Path, raw_list: list[str]) -> list[str]:
+    include_dir = root / "include"
+
+    include_paths = []
+    missing_files = []
+
+    for name in raw_list:
+        full_path = include_dir / name
+
+        if not full_path.exists():
+            missing_files.append(name)
+        else:
+            include_paths.append(str(full_path))
+
+    if missing_files:
+        names_list = ", ".join(missing_files)
+        die(
+            f"--include file(s) not found in {include_dir}/: {names_list}\n"
+            f"  Make sure the names match files that actually exist under\n"
+            f"  include/, and that you passed only basenames (no path)."
+        )
+
+    return include_paths

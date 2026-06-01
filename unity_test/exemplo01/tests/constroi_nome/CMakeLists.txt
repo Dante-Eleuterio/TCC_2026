@@ -3,7 +3,7 @@ project(exemplo01_tests C)
 
 set(CMAKE_C_STANDARD 11)
 
-# Mode: gcc (no coverage)
+# Mode: gcc (coverage enabled via gcovr)
 
 # ============================================================================
 #  Directories
@@ -32,9 +32,18 @@ target_include_directories(tddl_constroi_nome PRIVATE
 
 target_compile_definitions(tddl_constroi_nome PRIVATE
     TEST
+    UNITY_USE_COMMAND_LINE_ARGS
+    UNITY_OUTPUT_COLOR
+)
+
+target_compile_options(tddl_constroi_nome PRIVATE
+    --coverage
+    -O0
+    -g
 )
 
 target_link_options(tddl_constroi_nome PRIVATE
+    --coverage
     -Wl,--wrap=testa_nome
     -Wl,--wrap=constroi_nome
 )

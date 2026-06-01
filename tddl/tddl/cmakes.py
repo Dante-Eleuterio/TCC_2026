@@ -1,6 +1,6 @@
 # BSD 2-Clause License
 #
-# Copyright (c) 2026, Dante Eĺeutério dos Santos
+# Copyright (c) 2026, Dante Eleutério dos Santos
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
@@ -42,6 +42,7 @@ def generate_cmakelists(
     filc:         Path | None,
     src_file:     Path | None = None,
     wrap_funcs:   list[str]   = [],
+    include_list: list[str]   = []
 ) -> None:
     cmake_path = test_dir / "CMakeLists.txt"
 
@@ -61,8 +62,15 @@ def generate_cmakelists(
         if use_filc else ""
     )
 
-    # Optional separate source file (Structure B)
-    src_file_line = f"    {src_file}\n" if src_file else ""
+    extra_sources = ""
+
+    if src_file:
+        extra_sources += f"    {src_file}\n"
+
+    extra_sources += "".join(
+        f"    {inc}\n"
+        for inc in include_list
+    )
 
     # Coverage flags — only when --coverage is passed
     if use_coverage:
@@ -132,7 +140,7 @@ set(UNITY_INC {unity_inc})
 add_executable({target}
     {test_file}
     {unity_src}
-{src_file_line})
+{extra_sources})
 
 target_include_directories({target} PRIVATE
     ${{INC_DIR}}
@@ -141,6 +149,8 @@ target_include_directories({target} PRIVATE
 
 target_compile_definitions({target} PRIVATE
     TEST
+    UNITY_USE_COMMAND_LINE_ARGS
+    UNITY_OUTPUT_COLOR
 )
 
 {compile_options_block}{link_options_block}"""
@@ -162,7 +172,15 @@ def cmake_configure(tests_dir: Path, build_dir: Path) -> None:
     if result.returncode != 0:
         print(result.stdout)
         print(result.stderr, file=sys.stderr)
-        die("CMake configuration failed.")
+        die(
+            "CMake configuration failed — see the output above for the\n"
+            "  exact error. Common causes:\n"
+            "    • A header you #include doesn't exist in include/ or\n"
+            "      isn't passed via --include.\n"
+            "    • Unity not found (run `tddl --doctor` to diagnose).\n"
+            "    • cmake itself missing or too old (`tddl --build` installs\n"
+            "      a recent enough version)."
+        )
 
 
 def cmake_build(build_dir: Path, target: str) -> None:
@@ -174,4 +192,8 @@ def cmake_build(build_dir: Path, target: str) -> None:
     if result.returncode != 0:
         print(result.stdout)
         print(result.stderr, file=sys.stderr)
-        die("Build failed.")
+        die(
+            "Build failed — see compiler output above for the exact error.\n"
+            "  This is almost always a problem in your code (missing symbol,\n"
+            "  type mismatch, undefined reference) rather than in tddl itself."
+        )

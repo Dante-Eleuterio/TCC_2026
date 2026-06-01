@@ -1,4 +1,4 @@
-/*Dante Eĺeutério dos Santos GRR20206686*/
+/*Dante Eleutério dos Santos GRR20206686*/
 #ifndef __FOTOMOSAICO__
 #define __FOTOMOSAICO__
 
