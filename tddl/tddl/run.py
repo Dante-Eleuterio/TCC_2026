@@ -116,16 +116,11 @@ def _report_crash_on_terminal(
     
     name = _signal_name(signum)
 
-    # Mostra primeiro o que o Unity conseguiu reportar antes do crash —
-    # isso ajuda a localizar qual era o teste que estava rodando.
     if captured_stdout.strip():
         print(captured_stdout, end="")
         if not captured_stdout.endswith("\n"):
             print()
 
-    # Fil-C panic: caso prioritário. Detectado pela presença das
-    # mensagens do runtime no stderr, não pelo número do sinal
-    # (que poderia ser SIGTRAP por outros motivos).
     filc = _is_filc_panic(captured_stderr)
 
     print()
@@ -367,10 +362,6 @@ def run_gcovr(
         str(build_dir),
     ])
 
-    # JSON detalhado: contém o array `lines` por arquivo, necessário pra
-    # identificar quais linhas específicas não foram cobertas. Gerado em
-    # paralelo ao summary; parse_coverage_json no reports.py vai
-    # consumi-lo automaticamente se existir.
     subprocess.run([
         "gcovr",
         "--root", str(root),
@@ -420,9 +411,6 @@ def run_gcovr(
 
     info(f"Coverage: {lines_covered}/{lines_total} lines ({line_percent:.2f}%)")
 
-    # Em modo --pdf, parseamos o summary.json em uma estrutura tipada
-    # para a seção de Coverage do relatório consolidado. Reaproveitamos
-    # o mesmo JSON que acabamos de produzir.
     if pdf_collect is not None:
         from .reports import parse_coverage_json
         pdf_collect.append(parse_coverage_json(json_output))

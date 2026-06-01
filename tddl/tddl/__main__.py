@@ -163,10 +163,7 @@ def main() -> None:
     finally:
         cleanup(build_dir)
 
-    # ---------------- Geração do PDF combinado ----------------
-    # Mesmo se alguma ferramenta tiver falhado, geramos o PDF com o que
-    # foi coletado — o PDF é diagnóstico, não cabe a ele exigir sucesso.
-    # Cada summary é None se a ferramenta não rodou ou não populou nada.
+    
     if use_pdf:
         from .reports import generate_combined_pdf
 

@@ -33,24 +33,7 @@ def get_root() -> Path:
 
 
 def resolve_paths(arg: str) -> tuple[Path, Path, Path]:
-    """
-    Estrutura esperada (com subpasta por teste):
-        project/
-        ├── include/
-        ├── src/
-        └── tests/
-            └── teste1/
-                └── teste1.c   <- dentro de uma subpasta com o mesmo
-                                  nome (sem .c) do arquivo de teste
- 
-    Retorna:
-        root      = cwd()
-        test_dir  = cwd()/tests/<stem>/   <- subpasta específica do teste
-        test_file = cwd()/tests/<stem>/<arg>
- 
-    O CMakeLists.txt gerado pelo tddl fica em test_dir, isolado por teste,
-    permitindo builds independentes para cada teste.
-    """
+    
     filename = Path(arg).name
  
     if not filename.endswith(".c"):

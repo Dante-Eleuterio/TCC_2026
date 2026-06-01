@@ -216,15 +216,6 @@ def _ensure_python_tools() -> None:
         _run(['pipx', 'install', tool],
              f"Installing Python tool: {tool}", check=False)
 
-    # reportlab é biblioteca; injetamos no venv do gcovr (qualquer venv pipx
-    # serve, mas o gcovr é o mais provável de ser usado junto). Alternativa
-    # mais portátil: pipx install --include-deps + manter um pacote dummy.
-    # Aqui escolhemos `pipx inject gcovr reportlab` que é simples e bate
-    # com o caso de uso (gcovr roda com reportlab disponível).
-    #
-    # Mas o tddl em si também precisa de reportlab. Solução: instalar
-    # reportlab também via `pip install --user` para o python do sistema —
-    # o tddl roda como `python3 -m tddl` e usa o python padrão.
     try:
         import reportlab  # noqa: F401
         info("✓ reportlab already importable")
@@ -458,13 +449,7 @@ def run_build_filc(root: Path) -> None:
 # ----------------------------------------------------------------------------
 #  Doctor: read-only health check
 # ----------------------------------------------------------------------------
-#
-# Padrão inspirado em `flutter doctor` / `brew doctor` / `rustup check`:
-# inspeciona tudo, mostra um relatório, retorna exit code != 0 se algo
-# essencial estiver faltando. NÃO instala nada — pra isso existe --build.
 
-# Símbolos com cor ANSI quando o stdout é um terminal; degrada pra ASCII
-# puro se o output for redirecionado (`tddl --doctor > log.txt`).
 def _supports_color() -> bool:
     return sys.stdout.isatty()
 

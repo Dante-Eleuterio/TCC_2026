@@ -225,9 +225,7 @@ def parse_args() -> tuple[str, bool, bool, bool, bool, int, int, int, str, bool,
             die("--src requires a filename argument. e.g. --src constroi_nome.c")
         src_file = args[src_index + 1]
 
-    # `tddl --build`, `tddl --build-filc` e `tddl --doctor` são modos de
-    # setup/diagnóstico, mutuamente exclusivos com qualquer execução de
-    # teste. Checados em __main__.py.
+   
     build_structure = args[0] == "--build"
     build_filc      = args[0] == "--build-filc"
     run_doctor_flag = args[0] == "--doctor"

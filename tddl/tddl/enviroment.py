@@ -39,15 +39,7 @@ def _vendor_filc_clang(root: Path) -> Path:
 
 
 def get_unity_path(root: Path | None = None) -> Path:
-    """
-    Resolve onde está o Unity, na seguinte ordem:
-      1. $UNITY_PATH (se definido e válido)
-      2. ./vendor/unity (se existir e tiver src/unity.c)
-      3. erro — instrui a rodar `tddl --build`
-
-    O parâmetro root vem do __main__ (Path.cwd()) pra evitar acoplar
-    esse módulo ao path.get_root().
-    """
+    
     if root is None:
         root = Path.cwd()
 
@@ -86,12 +78,7 @@ def get_unity_path(root: Path | None = None) -> Path:
 
 
 def get_filc_path(root: Path | None = None) -> Path:
-    """
-    Resolve onde está o clang do Fil-C, na seguinte ordem:
-      1. $FIL_C_PATH (se definido e válido)
-      2. ./vendor/filc/build/bin/clang
-      3. erro — instrui a rodar `tddl --build-filc`
-    """
+   
     if root is None:
         root = Path.cwd()
 
@@ -129,13 +116,7 @@ def check_tools(
     use_lizard:   bool = False,
     use_pdf:      bool = False,
 ) -> None:
-    """
-    Verifica se as ferramentas externas necessárias estão no PATH.
-
-    Quando uma falta, a mensagem identifica qual flag a requer (em casos
-    onde a relação não é óbvia) e aponta pra `tddl --build` / `tddl
-    --doctor`.
-    """
+   
     # Lista de pares (tool, flag-que-requer). cmake é sempre necessário.
     required: list[tuple[str, str | None]] = [("cmake", None)]
     if use_coverage:
