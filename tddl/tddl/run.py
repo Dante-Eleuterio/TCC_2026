@@ -1,6 +1,6 @@
 # BSD 2-Clause License
 #
-# Copyright (c) 2026, Dante Eleutério dos Santos
+# Copyright (c) 2026, Dante Eĺeutério dos Santos
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
@@ -25,6 +25,7 @@
 
 import json
 import re
+import signal
 import subprocess
 from pathlib import Path
 from .helpers import die, info
@@ -48,22 +49,135 @@ def _resolve_executable(build_dir: Path, target: str) -> Path:
 
 
 # ----------------------------------------------------------------------------
-#  Padrão de out-parameter para coleta de summaries
+#  Detecção de crash por sinal (SIGSEGV, SIGABRT, SIGBUS, ...)
 # ----------------------------------------------------------------------------
 #
-# Quando `--pdf` está ativo, o __main__ cria uma lista por ferramenta e
-# passa adiante. Cada `run_*` faz `out.append(summary)` se for chamado.
-# No final, o __main__ chama generate_combined_pdf com tudo que foi
-# coletado.
+# Quando o binário de teste morre por sinal, Python/subprocess relata o
+# exit code de duas formas dependendo de quem matou o processo:
 #
-# Esse padrão tem duas vantagens sobre mudar o tipo de retorno:
-#   1. Não quebra callers existentes (retorno continua sendo bool).
-#   2. Funções podem opcionalmente popular múltiplos summaries (ex: lizard
-#      adiciona test_file e src_file separados, então usa list mesmo).
+#   * Diretamente pelo kernel:    returncode = -N    (ex: -11 para SIGSEGV)
+#   * Encerrado pelo shell/init:  returncode = 128+N (ex: 139 para SIGSEGV)
 #
-# Quando `pdf_collect` é None (modo sem --pdf), não capturamos a saída;
-# tudo segue ao vivo no terminal como antes.
+# Detectamos ambos para robustez. Quando rodando sob valgrind, o exit code
+# pode vir normalizado pela --error-exitcode=1 — nesse caso, o sinal é
+# mascarado e cai no fluxo normal de FAIL. Não tem como recuperar isso
+# aqui; o valgrind imprime a info no stderr e o tddl já mostra.
 # ----------------------------------------------------------------------------
+
+def _signal_from_returncode(returncode: int) -> int | None:
+   
+    if returncode < 0:
+        return -returncode
+    if returncode > 128:
+        return returncode - 128
+    return None
+
+
+def _signal_name(signum: int) -> str:
+    
+    try:
+        return signal.Signals(signum).name
+    except (ValueError, AttributeError):
+        return f"signal {signum}"
+
+
+# Regex para capturar a última linha de teste que o Unity conseguiu
+# imprimir antes de morrer. Funciona com ou sem mensagem, em qualquer
+# das três status finais.
+_UNITY_RESULT_LINE = re.compile(
+    r'^[^:\n]+:(\d+):([^:\n]+):(PASS|FAIL|IGNORE)',
+    re.MULTILINE,
+)
+
+
+def _last_test_before_crash(captured_stdout: str) -> tuple[str, int] | None:
+   
+    text = re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', captured_stdout)
+    matches = _UNITY_RESULT_LINE.findall(text)
+    if not matches:
+        return None
+    last_line, last_name, _status = matches[-1]
+    return (last_name.strip(), int(last_line))
+
+
+def _is_filc_panic(captured_stderr: str) -> bool:
+    
+    return (
+        'filc panic' in captured_stderr
+        or 'filc safety error' in captured_stderr
+    )
+
+
+def _report_crash_on_terminal(
+    signum:           int,
+    captured_stdout:  str,
+    captured_stderr:  str,
+) -> None:
+    
+    name = _signal_name(signum)
+
+    # Mostra primeiro o que o Unity conseguiu reportar antes do crash —
+    # isso ajuda a localizar qual era o teste que estava rodando.
+    if captured_stdout.strip():
+        print(captured_stdout, end="")
+        if not captured_stdout.endswith("\n"):
+            print()
+
+    # Fil-C panic: caso prioritário. Detectado pela presença das
+    # mensagens do runtime no stderr, não pelo número do sinal
+    # (que poderia ser SIGTRAP por outros motivos).
+    filc = _is_filc_panic(captured_stderr)
+
+    print()
+    info("=" * 60)
+    if filc:
+        info("FIL-C SAFETY VIOLATION DETECTED")
+        info("Fil-C interceptou uma violação de segurança de memória e")
+        info("encerrou o processo de forma controlada (Fil-C panic). Esse")
+        info("é o comportamento esperado quando o runtime do Fil-C detecta")
+        info("acesso a memória inválido — não é um crash não tratado.")
+        info("Veja o diagnóstico do Fil-C no stderr abaixo para localizar")
+        info("o arquivo, a linha e o ponteiro responsáveis.")
+    elif signum == signal.SIGSEGV:
+        info(f"TEST PROCESS CRASHED — {name} (segmentation fault)")
+        info("A test attempted an invalid memory access (NULL pointer,")
+        info("dangling pointer, out-of-bounds, stack overflow, ...).")
+    elif signum == signal.SIGABRT:
+        info(f"TEST PROCESS ABORTED — {name}")
+        info("A test triggered abort() — usually from a failed assert(),")
+        info("a stack smash, or a libc consistency check.")
+    elif signum == signal.SIGBUS:
+        info(f"TEST PROCESS CRASHED — {name} (bus error)")
+        info("Possibly a misaligned memory access or a mapped file issue.")
+    elif signum == signal.SIGFPE:
+        info(f"TEST PROCESS CRASHED — {name} (arithmetic error)")
+        info("Possibly a division by zero or invalid floating-point op.")
+    else:
+        info(f"TEST PROCESS TERMINATED — {name}")
+
+    last = _last_test_before_crash(captured_stdout)
+    if last is not None:
+        last_name, last_line = last
+        info("")
+        info(f"Last test reported by Unity: {last_name} (line {last_line})")
+        info("The crash occurred either inside this test or in the next one;")
+        info("Unity did not get a chance to report further results.")
+    else:
+        info("")
+        info("No test results were reported before the crash;")
+        info("the crash likely occurred during setUp() or before main().")
+
+    if captured_stderr.strip():
+        info("")
+        info("stderr captured from the test process:")
+        for line in captured_stderr.rstrip("\n").splitlines():
+            print(f"    {line}")
+
+    info("")
+    info("Tests after the crash were NOT executed. Fix the issue and re-run.")
+    info("=" * 60)
+    print()
+
 
 
 def _process_captured_unity(captured: str, pdf_collect: list | None) -> bool:
@@ -94,29 +208,42 @@ def run_tests(
     target:      str,
     pdf_collect: list | None = None,
 ) -> bool:
-    """
-    Roda o executável de testes Unity.
-
-    pdf_collect=None  -> comportamento clássico: output ao vivo no terminal.
-    pdf_collect=[]    -> captura stdout, popula list com UnitySummary,
-                          imprime só sumário curto.
-    """
+   
     executable = _resolve_executable(build_dir, target)
 
     info(f"Running tests: {executable}")
     print()
 
-    if pdf_collect is None:
-        result = subprocess.run([str(executable), "-v"])
-        print()
-        return result.returncode == 0
-
     result = subprocess.run(
         [str(executable), "-v"],
         capture_output=True, text=True,
     )
-    # Em modo --pdf, exit code do Unity é a fonte da verdade para
-    # tests_passed (não confunde com erro de parsing).
+
+    signum = _signal_from_returncode(result.returncode)
+
+    # ---------- Caminho 1: crash por sinal ----------
+    if signum is not None:
+        _report_crash_on_terminal(signum, result.stdout, result.stderr)
+
+        if pdf_collect is not None:
+            from .reports import parse_unity_output
+            summary = parse_unity_output(result.stdout)
+            pdf_collect.append(summary)
+
+        return False
+
+    # ---------- Caminho 2: execução normal (sem crash) ----------
+    if pdf_collect is None:
+        if result.stdout:
+            print(result.stdout, end="")
+            if not result.stdout.endswith("\n"):
+                print()
+        if result.stderr.strip():
+            print(result.stderr, end="")
+        print()
+        return result.returncode == 0
+
+    # Com --pdf: parse e sumário curto, igual ao comportamento anterior.
     _process_captured_unity(result.stdout, pdf_collect)
     return result.returncode == 0
 
@@ -127,16 +254,7 @@ def run_tests_valgrind(
     pdf_collect:          list | None = None,
     pdf_collect_valgrind: list | None = None,
 ) -> bool:
-    """
-    Roda sob valgrind. --error-exitcode=1 garante exit !=0 em erro de
-    memória mesmo com testes Unity ok.
-
-    pdf_collect           -> populado com UnitySummary  (stdout do binário)
-    pdf_collect_valgrind  -> populado com ValgrindSummary (stderr do valgrind)
-
-    Em modo --pdf (qualquer das duas listas != None), captura saída
-    completa; sem --pdf, comportamento clássico de output ao vivo.
-    """
+    
     executable = _resolve_executable(build_dir, target)
 
     info(f"Running tests under valgrind: {executable}")
@@ -152,21 +270,35 @@ def run_tests_valgrind(
         "-v",
     ]
 
-    capture = (pdf_collect is not None) or (pdf_collect_valgrind is not None)
-
-    if not capture:
-        result = subprocess.run(cmd)
-        print()
-        return result.returncode == 0
-
     result = subprocess.run(cmd, capture_output=True, text=True)
+    signum = _signal_from_returncode(result.returncode)
 
-    # Unity (stdout) — sumário curto + populate pdf_collect.
-    if pdf_collect is not None:
+    # ---------- Crash detectado mesmo sob valgrind (raro mas possível) ----------
+    if signum is not None:
+        _report_crash_on_terminal(signum, result.stdout, result.stderr)
+
+        if pdf_collect is not None:
+            from .reports import parse_unity_output
+            pdf_collect.append(parse_unity_output(result.stdout))
+
+        if pdf_collect_valgrind is not None:
+            from .reports import parse_valgrind_output
+            pdf_collect_valgrind.append(parse_valgrind_output(result.stderr))
+
+        return False
+
+    # ---------- Caminho normal: imprime stdout, depois stderr do valgrind ----------
+    if pdf_collect is None:
+        # Modo sem --pdf: imprime tudo no terminal.
+        if result.stdout:
+            print(result.stdout, end="")
+            if not result.stdout.endswith("\n"):
+                print()
+    else:
+        # Modo --pdf: sumário curto via parser.
         _process_captured_unity(result.stdout, pdf_collect)
 
-    # Valgrind (stderr) — sempre mostra ao usuário no terminal pra não
-    # esconder os diagnósticos; em modo --pdf, também parseia.
+    # Stderr do valgrind sai sempre — é o diagnóstico principal.
     if result.stderr.strip():
         print()
         info("valgrind diagnostics (stderr):")
@@ -195,18 +327,7 @@ def run_gcovr(
     src_file:    Path | None = None,
     pdf_collect: list | None = None,
 ) -> bool:
-    """
-    Roda o gcovr e retorna True se a cobertura de linhas for 100%.
-
-    Quando src_file é fornecido, o gcovr é restrito a esse arquivo via
-    --filter. Sempre gera resumo no terminal, summary.json, e relatório
-    HTML em project/coverage/<test_dir>/index.html.
-
-    pdf_collect=None  -> comportamento clássico.
-    pdf_collect=[]    -> além de gerar tudo o que já gerava, parseia o
-                          summary.json e popula a lista com CoverageSummary
-                          para a geração do PDF combinado.
-    """
+    
     coverages_dir = root / "coverage"
     coverages_dir.mkdir(exist_ok=True)
     test_coverage_dir = coverages_dir / test_dir.name
@@ -410,14 +531,7 @@ def run_lizard(
     args:        int = DEFAULT_LIZARD_ARGS,
     pdf_collect: list | None = None,
 ) -> bool:
-    """
-    Roda lizard no test_file e (opcionalmente) no src_file.
-
-    pdf_collect=None  -> imprime relatório textual no terminal.
-    pdf_collect=[]    -> roda em modo CSV silencioso, popula com
-                          LizardSummary (uma única entrada que contém
-                          os LizardFileReport por arquivo).
-    """
+    
     if pdf_collect is None:
         info(f"Lizard thresholds: CCN <= {ccn}, length <= {length}, args <= {args}")
         print()

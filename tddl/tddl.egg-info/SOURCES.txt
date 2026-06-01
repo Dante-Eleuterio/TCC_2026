@@ -7,7 +7,6 @@ tddl/cmakes.py
 tddl/enviroment.py
 tddl/helpers.py
 tddl/installer.py
-tddl/old_tddl.py
 tddl/path.py
 tddl/reports.py
 tddl/run.py
