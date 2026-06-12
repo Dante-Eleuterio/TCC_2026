@@ -41,10 +41,7 @@ UNITY_REPO    = "https://github.com/ThrowTheSwitch/Unity.git"
 UNITY_TAG     = "v2.6.0"   # release estável; pin pra builds reproduzíveis
 
 FILC_REPO     = "https://github.com/pizlonator/llvm-project-deluge.git"
-# Fil-C não tem tag oficial; usamos main. Quem quiser pinar pode editar aqui.
 
-# Pacotes do sistema, por gerenciador. Mantemos nomes diferentes entre
-# distros (ex.: build-essential vs base-devel) pra não exigir adivinhação.
 SYSTEM_PACKAGES = {
     'apt': {
         'cmake':         ['cmake'],
@@ -370,6 +367,91 @@ def _ensure_gitignore(root: Path) -> None:
 #  Entry points (chamados por __main__.py)
 # ----------------------------------------------------------------------------
 
+EXAMPLE_HEADER = """\
+#ifndef EXAMPLE_H
+#define EXAMPLE_H
+
+int example_sum(int a, int b);
+
+#endif
+"""
+
+EXAMPLE_SRC = """\
+#include "example.h"
+
+int example_sum(int a, int b)
+{
+    return a + b;
+}
+"""
+
+EXAMPLE_TEST = """\
+#include "unity.h"
+#include "example.h"
+
+void setUp(void)    {}
+void tearDown(void) {}
+
+void test_example_sum_two_positives(void)
+{
+    TEST_ASSERT_EQUAL_INT(5, example_sum(2, 3));
+}
+
+void test_example_sum_with_zero(void)
+{
+    TEST_ASSERT_EQUAL_INT(7, example_sum(7, 0));
+}
+
+void test_example_sum_two_negatives(void)
+{
+    TEST_ASSERT_EQUAL_INT(-8, example_sum(-3, -5));
+}
+
+void test_example_sum_positive_and_negative(void)
+{
+    TEST_ASSERT_EQUAL_INT(2, example_sum(5, -3));
+}
+
+int main(void)
+{
+    UNITY_BEGIN();
+    RUN_TEST(test_example_sum_two_positives);
+    RUN_TEST(test_example_sum_with_zero);
+    RUN_TEST(test_example_sum_two_negatives);
+    RUN_TEST(test_example_sum_positive_and_negative);
+    return UNITY_END();
+}
+"""
+
+
+def _ensure_example_project(root: Path) -> bool:
+    """
+    Cria 3 arquivos de exemplo (include/example.h, src/example.c,
+    tests/example_test/example_test.c) se eles ainda não existirem.
+
+    Não sobrescreve nada — segue o princípio idempotente do --build.
+    Retorna True se ao menos um arquivo foi criado nesta execução
+    (útil para o caller decidir o que mostrar ao usuário).
+    """
+    targets = [
+        (root / "include" / "example.h",                   EXAMPLE_HEADER),
+        (root / "src"     / "example.c",                   EXAMPLE_SRC),
+        (root / "tests"   / "example_test" / "example_test.c", EXAMPLE_TEST),
+    ]
+
+    created_any = False
+    for path, content in targets:
+        if path.exists():
+            info(f"Example file already exists, skipping: {path.relative_to(root)}")
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+        info(f"Created example file: {path.relative_to(root)}")
+        created_any = True
+
+    return created_any
+
+
 def run_build(root: Path) -> None:
     """
     Executa o `tddl --build`:
@@ -401,20 +483,41 @@ def run_build(root: Path) -> None:
     _ensure_unity(root)
     print()
 
-    info("─── 4/4: Project layout ────────────────────────────")
+    info("─── 4/5: Project layout ────────────────────────────")
     # create_structure() vive em path.py; importamos aqui pra evitar ciclo.
     from .path import create_structure
     create_structure(root)
     _ensure_gitignore(root)
     print()
 
+    info("─── 5/5: Example project ───────────────────────────")
+    _ensure_example_project(root)
+    print()
+
     info("=" * 60)
-    info("Build complete. You can now run:")
-    info(f"  tddl <test_file.c>")
+    info("Build complete.")
     info("")
-    info("To install Fil-C (optional, ~30-60 min build), run:")
-    info(f"  tddl --build-filc")
+    info("An example project has been created. Try running it now:")
+    info("")
+    info("  tddl example_test.c --src example.c")
+    info("")
+    info("Or with the full instrumentation set:")
+    info("")
+    info("  tddl example_test.c --src example.c --coverage --valgrind --lizard --pdf")
+    info("")
+    info("Full usage reference below.")
     info("=" * 60)
+    print()
+
+    
+    import sys
+    original_argv = sys.argv
+    sys.argv = [sys.argv[0], "--help"]
+    try:
+        from .arguments import parse_args
+        parse_args()
+    finally:
+        sys.argv = original_argv
 
 
 def run_build_filc(root: Path) -> None:
@@ -592,9 +695,7 @@ def run_doctor(root: Path) -> int:
     have_cmake  = _check_binary('cmake')
     have_git    = _check_binary('git')
     have_gcc    = _check_binary('gcc') or _check_binary('cc')
-    # gcc OU cc é o que importa, então se gcc faltou mas cc tá lá, ok.
-    # _check_binary já imprimiu as duas linhas — bom o suficiente pra
-    # diagnóstico.
+    
     print()
 
     print("Testing & analysis tools:")
@@ -623,11 +724,7 @@ def run_doctor(root: Path) -> int:
                         f'not present (run `tddl --build` to create)')
     print()
 
-    # Resumo: o que é essencial pro fluxo `tddl <file>` mínimo:
-    #   cmake + gcc/cc + Unity → tests compilam e rodam.
-    # Tudo o resto é por-flag (valgrind só pra --valgrind, etc).
-    # Pra um diagnóstico útil, marcamos faltas em qualquer tool de teste
-    # como problema, porque o usuário normalmente quer tudo.
+   
     essential_missing = []
     if not have_cmake:    essential_missing.append('cmake')
     if not have_gcc:      essential_missing.append('gcc')
@@ -650,9 +747,7 @@ def run_doctor(root: Path) -> int:
         print()
         info("Run `tddl --build` to install missing dependencies.")
         info("(Fil-C is separate: run `tddl --build-filc` if you need --filc.)")
-        # Exit 1 se algo essencial OU qualquer feature tool faltar — o
-        # objetivo é o usuário ver "tudo verde" antes de considerar o
-        # ambiente pronto.
+        
         info("=" * 60)
         return 1
 

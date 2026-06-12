@@ -5,7 +5,7 @@ with open("README.md", "r") as fh:
 
 setup(
     name="tddl",
-    version="0.1.0",
+    version="1.0.0",
     author="Dante Eleuterio, Felipe Bombardelli",
     author_email="danteeleuterio00@email.com",
     description="Python Framework to help run Unity tests on C code",
